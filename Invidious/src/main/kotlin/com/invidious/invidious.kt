@@ -2,24 +2,20 @@ package com.invidious
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicInteger
 
 class InvidiousProvider : MainAPI() {
 
-    override var name = "Invidious PRO+"
     override var mainUrl = "https://inv.nadeko.net"
-    override val supportedTypes = setOf(TvType.Movie)
+    override var name = "Invidious"
     override var lang = "en"
     override val hasMainPage = true
-
-    // =========================
-    // INSTANCIAS
-    // =========================
+    override val supportedTypes = setOf(TvType.Movie)
 
     private val instances = listOf(
         "https://inv.nadeko.net",
@@ -44,173 +40,53 @@ class InvidiousProvider : MainAPI() {
         return instances.first()
     }
 
-    // =========================
-    // SUSCRIPCIONES
-    // =========================
-
-    private fun getPrefs(): Context =
-        AcraApplication.context
-
-    private fun getSubscriptions(): MutableSet<String> {
-        val prefs = getPrefs().getSharedPreferences("invidious_subs", Context.MODE_PRIVATE)
-        return prefs.getStringSet("channels", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-    }
-
-    private fun addSubscription(channelId: String) {
-        val prefs = getPrefs().getSharedPreferences("invidious_subs", Context.MODE_PRIVATE)
-        val set = getSubscriptions()
-        set.add(channelId)
-        prefs.edit().putStringSet("channels", set).apply()
-    }
-
-    // =========================
-    // HOME
-    // =========================
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val base = getWorkingInstance()
 
-        val subs = getSubscriptions()
+        val trendingJson = app.get("$base/api/v1/trending?fields=videoId,title").text
 
-        val subscriptionVideos = subs.flatMap { channelId ->
-            try {
-                val res = tryParseJson<List<SearchEntry>>(
-                    app.get("$base/api/v1/channels/$channelId/videos?fields=videoId,title").text
-                )
-                res ?: emptyList()
-            } catch (_: Exception) {
-                emptyList()
-            }
-        }
+        val regex = """"videoId":"(.*?)".*?"title":"(.*?)"""".toRegex()
 
-        val trending = tryParseJson<List<SearchEntry>>(
-            app.get("$base/api/v1/trending?fields=videoId,title").text
-        )
+        val results = regex.findAll(trendingJson).map {
+            val id = it.groupValues[1]
+            val title = it.groupValues[2]
+            newMovieSearchResponse(title, "$base/watch?v=$id", TvType.Movie)
+        }.toList()
 
-        return newHomePageResponse(
-            listOf(
-                HomePageList(
-                    "Suscripciones",
-                    subscriptionVideos.map { it.toSearchResponse(this) },
-                    true
-                ),
-                HomePageList(
-                    "Trending",
-                    trending?.map { it.toSearchResponse(this) } ?: emptyList(),
-                    true
-                )
-            ),
-            false
-        )
+        return newHomePageResponse(listOf(HomePageList("Trending", results)))
     }
 
-    // =========================
-    // SEARCH
-    // =========================
-
-    override suspend fun search(query: String, page: Int): SearchResponseList? {
-
+    override suspend fun search(query: String): List<SearchResponse> {
         val base = getWorkingInstance()
         val encoded = URLEncoder.encode(query, "UTF-8")
 
-        val videos = tryParseJson<List<SearchEntry>>(
-            app.get("$base/api/v1/search?q=$encoded&page=$page&type=video&fields=videoId,title").text
-        )
+        val json = app.get("$base/api/v1/search?q=$encoded&type=video").text
 
-        val playlists = tryParseJson<List<PlaylistEntry>>(
-            app.get("$base/api/v1/search?q=$encoded&page=$page&type=playlist").text
-        )
+        val regex = """"videoId":"(.*?)".*?"title":"(.*?)"""".toRegex()
 
-        val channels = tryParseJson<List<ChannelEntry>>(
-            app.get("$base/api/v1/search?q=$encoded&page=$page&type=channel").text
-        )
-
-        val results = mutableListOf<SearchResponse>()
-
-        videos?.forEach { results.add(it.toSearchResponse(this)) }
-        playlists?.forEach { results.add(it.toSearchResponse(this)) }
-        channels?.forEach { results.add(it.toSearchResponse(this)) }
-
-        return results.toNewSearchResponseList()
+        return regex.findAll(json).map {
+            val id = it.groupValues[1]
+            val title = it.groupValues[2]
+            newMovieSearchResponse(title, "$base/watch?v=$id", TvType.Movie)
+        }.toList()
     }
 
-    // =========================
-    // LOAD
-    // =========================
-
     override suspend fun load(url: String): LoadResponse? {
-
         val base = getWorkingInstance()
-
-        if (url.contains("/playlist?list=")) {
-            val id = url.substringAfter("list=")
-            return loadPlaylist(base, id)
-        }
-
-        if (url.contains("/channel/")) {
-            val id = url.substringAfter("/channel/")
-            return loadChannel(base, id)
-        }
 
         val videoId = Regex("watch\\?v=([a-zA-Z0-9_-]+)")
             .find(url)?.groups?.get(1)?.value ?: return null
 
-        val video = tryParseJson<VideoEntry>(
-            app.get("$base/api/v1/videos/$videoId").text
-        ) ?: return null
+        val json = app.get("$base/api/v1/videos/$videoId").text
 
-        return newMovieLoadResponse(
-            video.title,
-            "$base/watch?v=$videoId",
-            TvType.Movie,
-            videoId
-        ) {
-            plot = video.description
+        val title = """"title":"(.*?)"""".toRegex().find(json)?.groupValues?.get(1) ?: return null
+        val description = """"description":"(.*?)"""".toRegex().find(json)?.groupValues?.get(1)
+
+        return newMovieLoadResponse(title, url, TvType.Movie, videoId) {
+            plot = description
             posterUrl = "$base/vi/$videoId/hqdefault.jpg"
         }
     }
-
-    private suspend fun loadPlaylist(base: String, id: String): LoadResponse? {
-        val playlist = tryParseJson<PlaylistResponse>(
-            app.get("$base/api/v1/playlists/$id").text
-        ) ?: return null
-
-        return newMovieLoadResponse(
-            playlist.title,
-            "$base/playlist?list=$id",
-            TvType.Movie,
-            id
-        ) {
-            recommendations = playlist.videos.map {
-                it.toSearchResponse(this@InvidiousProvider)
-            }
-        }
-    }
-
-    private suspend fun loadChannel(base: String, id: String): LoadResponse? {
-
-        addSubscription(id)
-
-        val videos = tryParseJson<List<SearchEntry>>(
-            app.get("$base/api/v1/channels/$id/videos?fields=videoId,title").text
-        ) ?: return null
-
-        return newMovieLoadResponse(
-            "Canal $id",
-            "$base/channel/$id",
-            TvType.Movie,
-            id
-        ) {
-            recommendations = videos.map {
-                it.toSearchResponse(this@InvidiousProvider)
-            }
-        }
-    }
-
-    // =========================
-    // LINKS
-    // =========================
 
     override suspend fun loadLinks(
         data: String,
@@ -220,72 +96,27 @@ class InvidiousProvider : MainAPI() {
     ): Boolean {
 
         val base = getWorkingInstance()
+        val json = app.get("$base/api/v1/videos/$data").text
 
-        val video = tryParseJson<VideoEntry>(
-            app.get("$base/api/v1/videos/$data").text
-        ) ?: return false
+        val streamRegex = """"url":"(.*?)".*?"qualityLabel":"(.*?)"""".toRegex()
 
-        video.formatStreams?.forEach { stream ->
-            val q = stream.qualityLabel?.replace("p", "")?.toIntOrNull()
-                ?: Qualities.Unknown.value
+        streamRegex.findAll(json).forEach {
+            val url = it.groupValues[1].replace("\\u0026", "&")
+            val qualityLabel = it.groupValues[2]
+            val q = qualityLabel.replace("p", "").toIntOrNull() ?: Qualities.Unknown.value
 
             callback(
                 newExtractorLink(
                     name,
-                    stream.qualityLabel ?: "Unknown",
-                    stream.url
+                    qualityLabel,
+                    url
                 ) {
                     quality = q
-                    type = ExtractorLinkType.VIDEO
-                    referer = base
+                    this.referer = base
                 }
             )
         }
 
         return true
     }
-
-    // =========================
-    // DATA
-    // =========================
-
-    private data class SearchEntry(
-        val title: String,
-        val videoId: String
-    ) {
-        fun toSearchResponse(provider: InvidiousProvider): SearchResponse {
-            return provider.newMovieSearchResponse(
-                title,
-                "${provider.mainUrl}/watch?v=$videoId",
-                TvType.Movie
-            )
-        }
-    }
-
-    private data class PlaylistEntry(
-        val title: String,
-        val playlistId: String
-    )
-
-    private data class ChannelEntry(
-        val author: String,
-        val authorId: String
-    )
-
-    private data class PlaylistResponse(
-        val title: String,
-        val videos: List<SearchEntry>
-    )
-
-    private data class VideoEntry(
-        val title: String,
-        val description: String?,
-        val videoId: String,
-        val formatStreams: List<FormatStream>?
-    )
-
-    private data class FormatStream(
-        val url: String,
-        val qualityLabel: String?
-    )
 }
