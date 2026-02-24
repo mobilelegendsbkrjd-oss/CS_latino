@@ -3,92 +3,121 @@ package com.verpeliculasonline
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
-import com.fasterxml.jackson.annotation.JsonProperty
 
 class VerPeliculasOnline : MainAPI() {
     override var mainUrl = "https://verpeliculasonline.org"
     override var name = "VerPeliculasOnline"
     override var lang = "es"
     override val hasMainPage = true
-    override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val hasDownloadSupport = false
 
+    // Agregamos más categorías
     override val mainPage = mainPageOf(
+        "/" to "Inicio",
         "/categoria/peliculas/" to "Películas",
         "/categoria/series/" to "Series",
-        "/categoria/accion/" to "Acción",
-        "/categoria/comedia/" to "Comedia",
-        "/categoria/terror/" to "Terror"
+        "/genero/accion/" to "Acción",
+        "/genero/aventura/" to "Aventura",
+        "/genero/drama/" to "Drama"
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}page/$page/"
-        val doc = app.get(fixUrl(url)).document
-
-        val items = doc.select("article, .movie, .item").mapNotNull {
-            val a = it.selectFirst("a") ?: return@mapNotNull null
-            val title = it.selectFirst("h3, h2, .title")?.text() ?: return@mapNotNull null
-            val poster = it.selectFirst("img")?.attr("data-src")
-                ?: it.selectFirst("img")?.attr("src")
-                ?: it.selectFirst("img")?.attr("data-lazy-src")
-
-            newMovieSearchResponse(
-                title.trim(),
-                fixUrl(a.attr("href")),
-                TvType.Movie
-            ) {
-                posterUrl = fixUrlNull(poster)
-            }
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val url = if (request.data == "/") {
+            mainUrl + if (page > 1) "/page/$page/" else "/"
+        } else {
+            fixUrl(request.data) + if (page > 1) "page/$page/" else ""
+        }
+        
+        val document = app.get(url).document
+        
+        val items = document.select("article, .item, .post").mapNotNull { element ->
+            parseHomeItem(element)
         }
 
         return newHomePageResponse(
-            listOf(HomePageList(request.name, items)),
+            list = listOf(HomePageList(request.name, items)),
             hasNext = items.isNotEmpty()
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/?s=$query").document
-        return doc.select("article, .movie, .item").mapNotNull {
-            val a = it.selectFirst("a") ?: return@mapNotNull null
-            val title = it.selectFirst("h3, h2, .title")?.text() ?: return@mapNotNull null
-            val poster = it.selectFirst("img")?.attr("data-src")
-                ?: it.selectFirst("img")?.attr("src")
-                ?: it.selectFirst("img")?.attr("data-lazy-src")
+    private fun parseHomeItem(element: Element): SearchResponse? {
+        val anchor = element.selectFirst("a") ?: return null
+        val href = anchor.attr("href") ?: return null
+        val title = element.selectFirst("h2, h3, h4, .title, .entry-title")?.text() ?: return null
+        
+        // Buscar imagen de múltiples formas
+        val img = element.selectFirst("img")
+        val poster = when {
+            img?.hasAttr("data-src") == true -> img.attr("data-src")
+            img?.hasAttr("src") == true -> img.attr("src")
+            img?.hasAttr("data-lazy-src") == true -> img.attr("data-lazy-src")
+            else -> null
+        }
 
-            newMovieSearchResponse(
-                title.trim(),
-                fixUrl(a.attr("href")),
-                TvType.Movie
-            ) {
-                posterUrl = fixUrlNull(poster)
+        // Determinar si es serie o película por URL o contenido
+        val type = if (href.contains("/serie/") || element.selectFirst(".tvshows") != null) {
+            TvType.TvSeries
+        } else {
+            TvType.Movie
+        }
+
+        return if (type == TvType.TvSeries) {
+            newTvSeriesSearchResponse(title, href) {
+                this.posterUrl = fixUrlNull(poster)
+            }
+        } else {
+            newMovieSearchResponse(title, href, type) {
+                this.posterUrl = fixUrlNull(poster)
             }
         }
     }
 
-    override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
-        val title = doc.selectFirst("h1")?.text() ?: ""
-        val poster = doc.selectFirst(".poster img, .imagen img, meta[property='og:image']")?.attr("src")
-            ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
-        val plot = doc.selectFirst(".sinopsis, .descripcion, .entry-content p, .wp-block-post-excerpt__excerpt")?.text()
-
-        val episodes = doc.select("a[href*='capitulo'], a[href*='episodio'], .episodios a").mapIndexed { idx, el ->
-            newEpisode(fixUrl(el.attr("href"))) {
-                name = el.text()
-                episode = idx + 1
-            }
+    override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/?s=$query"
+        val document = app.get(url).document
+        
+        return document.select("article, .item, .post").mapNotNull { element ->
+            parseHomeItem(element)
         }
+    }
 
-        return if (episodes.isEmpty()) {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
-                posterUrl = fixUrlNull(poster)
-                this.plot = plot
+    override suspend fun load(url: String): LoadResponse {
+        val document = app.get(url).document
+        
+        val title = document.selectFirst("h1, .entry-title")?.text()?.trim() ?: "Sin título"
+        
+        // Obtener poster de múltiples fuentes
+        val poster = document.selectFirst("meta[property='og:image']")?.attr("content")
+            ?: document.selectFirst("img[src*='poster'], .poster img")?.attr("src")
+        
+        // Obtener año
+        val year = Regex("(\\d{4})").find(
+            document.selectFirst(".year, .date")?.text() ?: ""
+        )?.groupValues?.getOrNull(1)?.toIntOrNull()
+        
+        // Obtener descripción
+        val description = document.selectFirst(".entry-content, .description, .sinopsis")?.text()
+            ?: document.selectFirst("meta[name='description']")?.attr("content")
+        
+        // Verificar si es serie
+        val isSeries = url.contains("/serie/") || document.selectFirst(".tvshows, .seasons") != null
+        
+        return if (isSeries) {
+            // Para series, necesitaríamos parsear temporadas y episodios
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, emptyList()) {
+                this.posterUrl = fixUrlNull(poster)
+                this.year = year
+                this.plot = description
             }
         } else {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                posterUrl = fixUrlNull(poster)
-                this.plot = plot
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = fixUrlNull(poster)
+                this.year = year
+                this.plot = description
             }
         }
     }
@@ -99,149 +128,88 @@ class VerPeliculasOnline : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
-            // Obtener la página para buscar información
-            val doc = app.get(data).document
-            
-            // Intentar hacer solicitud AJAX primero (OPUXA)
-            val postId = extractPostId(doc, data)
-            
-            if (postId.isNotEmpty()) {
-                try {
-                    val ajaxResponse = app.post(
-                        "${mainUrl}/wp-admin/admin-ajax.php",
-                        data = mapOf(
-                            "action" to "doo_player_ajax",
-                            "post" to postId,
-                            "nume" to "1",
-                            "type" to "movie"
-                        ),
-                        headers = mapOf(
-                            "X-Requested-With" to "XMLHttpRequest",
-                            "Content-Type" to "application/x-www-form-urlencoded"
-                        )
-                    ).parsedSafe<AjaxResponse>()
-                    
-                    if (ajaxResponse?.embedUrl != null) {
-                        val videoUrl = ajaxResponse.embedUrl
-                        loadExtractor(fixUrl(videoUrl), data, subtitleCallback, callback)
-                        return true
-                    }
-                } catch (e: Exception) {
-                    // Si falla AJAX, continuar con otros métodos
-                    e.printStackTrace()
-                }
+        val document = app.get(data).document
+        
+        // Método 1: Buscar iframes directos
+        val iframes = document.select("iframe[src]")
+        iframes.forEach { iframe ->
+            val src = iframe.attr("src")
+            if (src.isNotBlank() && !src.contains("facebook") && !src.contains("twitter")) {
+                loadExtractor(fixUrl(src), data, subtitleCallback, callback)
             }
-            
-            // Buscar iframes directamente en la página
-            val iframes = doc.select("iframe, .video-container iframe, .player iframe")
-            
-            iframes.forEach {
-                val src = it.attr("src")
-                if (src.isNotBlank()) {
-                    loadExtractor(
-                        fixUrl(src),
-                        data,
-                        subtitleCallback,
-                        callback
-                    )
-                    return true
-                }
-            }
-            
-            // Buscar scripts que puedan contener URLs de video
-            doc.select("script").forEach { script ->
-                val scriptText = script.html()
-                // Buscar URLs de opuxa
-                if (scriptText.contains("opuxa")) {
-                    val patterns = listOf(
-                        "https?:\\/\\/[^\"'\\s]*opuxa[^\"'\\s]*\\/[^\"'\\s]*",
-                        "src\\s*=\\s*[\"'](https?:\\/\\/[^\"'\\s]*opuxa[^\"'\\s]*)[\"']"
-                    )
-                    
-                    patterns.forEach { pattern ->
-                        val regex = Regex(pattern, RegexOption.IGNORE_CASE)
-                        regex.findAll(scriptText).forEach { match ->
-                            val urlMatch = match.value
-                            if (urlMatch.contains("opuxa")) {
-                                loadExtractor(fixUrl(urlMatch), data, subtitleCallback, callback)
-                                return true
-                            }
-                        }
-                    }
-                }
-                
-                // Buscar URLs comunes de video
-                val videoPatterns = listOf(
-                    "https?:\\/\\/[^\"'\\s]+\\.(mp4|m3u8|webm)[^\"'\\s]*",
-                    "src\\s*=\\s*[\"'](https?:\\/\\/[^\"']+)[\"']",
-                    "file\\s*:\\s*[\"'](https?:\\/\\/[^\"']+)[\"']"
-                )
-                
-                videoPatterns.forEach { pattern ->
-                    val regex = Regex(pattern, RegexOption.IGNORE_CASE)
-                    regex.findAll(scriptText).forEach { match ->
-                        val videoUrl = match.value
-                        if (videoUrl.isNotBlank()) {
-                            loadExtractor(
-                                fixUrl(videoUrl),
-                                data,
-                                subtitleCallback,
-                                callback
-                            )
-                            return true
-                        }
-                    }
-                }
-            }
-            
-            // Buscar en meta tags
-            doc.select("meta[property='og:video'], meta[property='og:video:url']").forEach {
-                val content = it.attr("content")
-                if (content.isNotBlank()) {
-                    loadExtractor(fixUrl(content), data, subtitleCallback, callback)
-                    return true
-                }
-            }
-            
-            // Buscar enlaces en la página
-            doc.select("a[href*='watch'], a[href*='video'], a[href*='player']").forEach {
-                val href = it.attr("href")
-                if (href.isNotBlank() && !href.startsWith("#")) {
-                    loadExtractor(fixUrl(href), data, subtitleCallback, callback)
-                    return true
-                }
-            }
-            
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
         
-        return false
-    }
-    
-    private fun extractPostId(doc: org.jsoup.nodes.Document, url: String): String {
-        // Intentar extraer el ID del post de diferentes formas
-        return doc.selectFirst("link[rel=shortlink]")?.attr("href")
-            ?.substringAfter("?p=")
-            ?: doc.selectFirst("input[name=post]")?.attr("value")
-            ?: doc.selectFirst("meta[name=post_id]")?.attr("content")
-            ?: doc.selectFirst("#post_id")?.attr("value")
-            ?: url.substringAfter("/pelicula/").substringBefore("/").let { slug ->
-                // Si tenemos un slug, podemos intentar buscar el post ID
-                if (slug.isNotEmpty()) {
-                    // Buscar en scripts
-                    val scriptText = doc.select("script").html()
-                    val pattern = Regex("post_id\\s*[:=]\\s*['\"]?(\\d+)['\"]?")
-                    pattern.find(scriptText)?.groupValues?.get(1) ?: ""
-                } else {
-                    ""
+        // Método 2: Buscar enlaces en scripts
+        document.select("script").forEach { script ->
+            val scriptText = script.html()
+            // Patrones comunes de reproductores
+            val patterns = listOf(
+                Regex("""src\s*[:=]\s*['"]([^'"]+)['"]"""),
+                Regex("""iframe.*?src\s*=\s*['"]([^'"]+)['"]"""),
+                Regex("""(https?://[^\s"']+\.(?:mp4|m3u8))""")
+            )
+            
+            patterns.forEach { pattern ->
+                pattern.findAll(scriptText).forEach { match ->
+                    val url = match.groupValues[1]
+                    if (url.isNotBlank() && url.contains("http")) {
+                        loadExtractor(fixUrl(url), data, subtitleCallback, callback)
+                    }
                 }
             }
+        }
+        
+        // Método 3: Intentar con AJAX (método original)
+        try {
+            val postId = findPostId(document)
+            if (postId != null) {
+                val json = app.post(
+                    "$mainUrl/wp-admin/admin-ajax.php",
+                    data = mapOf(
+                        "action" to "doo_player_ajax",
+                        "post" to postId,
+                        "nume" to "1",
+                        "type" to "movie"
+                    ),
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                ).text
+                
+                val embedUrl = Regex("\"embed_url\"\\s*:\\s*\"([^\"]+)\"")
+                    .find(json)
+                    ?.groupValues?.get(1)
+                    ?.replace("\\/", "/")
+                
+                if (embedUrl != null) {
+                    loadExtractor(fixUrl(embedUrl), data, subtitleCallback, callback)
+                }
+            }
+        } catch (e: Exception) {
+            // Ignorar error y continuar con otros métodos
+        }
+        
+        return true
     }
-    
-    data class AjaxResponse(
-        @JsonProperty("embed_url") val embedUrl: String?,
-        @JsonProperty("type") val type: String?
-    )
+
+    private fun findPostId(doc: org.jsoup.nodes.Document): String? {
+        // Buscar ID en múltiples lugares
+        doc.select("script").forEach {
+            val patterns = listOf(
+                Regex("post\\s*:\\s*['\"]?(\\d+)"),
+                Regex("post_id\\s*:\\s*['\"]?(\\d+)"),
+                Regex("id\\s*:\\s*['\"]?(\\d+)")
+            )
+            
+            patterns.forEach { pattern ->
+                val match = pattern.find(it.html())
+                if (match != null) return match.groupValues[1]
+            }
+        }
+        
+        // Intentar obtener ID de la URL
+        Regex("""/(\d+)/""").find(doc.location())?.groupValues?.getOrNull(1)?.let {
+            return it
+        }
+        
+        return null
+    }
 }
