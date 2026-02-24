@@ -2,7 +2,15 @@ package com.latinluchas
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.extractors.FilemoonV2
+import com.lagradost.cloudstream3.extractors.Filesim
+import com.lagradost.cloudstream3.extractors.StreamWishExtractor
 import com.lagradost.cloudstream3.extractors.VidStack
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.app
+import com.lagradost.api.Log
+import okhttp3.FormBody
+import org.json.JSONObject
 
 class LatinLuchaUpns : VidStack() {
     override var name = "LatinLucha Upns"
@@ -114,35 +122,83 @@ class LatinLuchas : MainAPI() {
     // LOAD LINKS (NO TOCAR)
     // =========================
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
 
-        val document = app.get(data).document
+    val document = app.get(data).document
 
-        document.select("iframe").forEach { iframe ->
+    document.select("iframe").forEach { iframe ->
 
-            var src = iframe.attr("abs:src")
-                .ifBlank { iframe.attr("abs:data-src") }
-                .ifBlank { iframe.attr("src") }
+        var src = iframe.attr("abs:src")
+            .ifBlank { iframe.attr("abs:data-src") }
+            .ifBlank { iframe.attr("src") }
 
-            if (src.isBlank()) return@forEach
+        if (src.isBlank()) return@forEach
 
-            if (src.startsWith("//"))
-                src = "https:$src"
+        if (src.startsWith("//"))
+            src = "https:$src"
 
-            when {
-                src.contains("upns.online") ->
-                    LatinLuchaUpns()
-                        .getUrl(src, data, subtitleCallback, callback)
+        when {
 
-                else ->
-                    loadExtractor(src, data, subtitleCallback, callback)
-            }
+            // UPNS
+            src.contains("upns.online") ->
+                LatinLuchaUpns()
+                    .getUrl(src, data, subtitleCallback, callback)
+
+            // ONION UNS (Byzekose)
+            src.contains("uns.wtf") ->
+                Movierulzups()
+                    .getUrl(src, data, subtitleCallback, callback)
+
+            // CHERRY
+            src.contains("cherry.upns") ->
+                CherryUpns()
+                    .getUrl(src, data, subtitleCallback, callback)
+
+            else ->
+                loadExtractor(src, data, subtitleCallback, callback)
         }
-
-        return true
     }
+
+    return true
+}
+// ===============================
+// SERVIDORES EXTRA INTEGRADOS
+// ===============================
+
+class FMHD : Filesim() {
+    override val name = "FMHD"
+    override var mainUrl = "https://fmhd.bar/"
+    override val requiresReferer = true
+}
+
+class Playonion : Filesim() {
+    override val mainUrl = "https://playonion.sbs"
+}
+
+class Luluvdo : StreamWishExtractor() {
+    override val mainUrl = "https://luluvdo.com"
+}
+
+class Lulust : StreamWishExtractor() {
+    override val mainUrl = "https://lulu.st"
+}
+
+class Movierulz : FilemoonV2() {
+    override var name = "Movierulz"
+    override var mainUrl = "https://movierulz2025.bar"
+}
+
+class Movierulzups : VidStack() {
+    override var name = "Movierulz"
+    override var mainUrl = "https://onion.uns.wtf"
+}
+
+class CherryUpns : VidStack() {
+    override var name = "Movierulz"
+    override var mainUrl = "https://cherry.upns.online"
+}
 }
