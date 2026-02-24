@@ -4,7 +4,9 @@ import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicInteger
 
 class InvidiousProvider : MainAPI() {
@@ -22,8 +24,7 @@ class InvidiousProvider : MainAPI() {
     private val instances = listOf(
         "https://inv.nadeko.net",
         "https://inv.vern.cc",
-        "https://invidious.jing.rocks",
-        "https://invidious.slipfox.xyz"
+        "https://invidious.jing.rocks"
     )
 
     private val index = AtomicInteger(0)
@@ -47,18 +48,19 @@ class InvidiousProvider : MainAPI() {
     // SUSCRIPCIONES
     // =========================
 
-    private fun getPrefs(context: Context) =
-        context.getSharedPreferences("invidious_subs", Context.MODE_PRIVATE)
+    private fun getPrefs(): Context =
+        AcraApplication.context
 
-    private fun getSubscriptions(context: Context): MutableSet<String> {
-        return getPrefs(context)
-            .getStringSet("channels", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+    private fun getSubscriptions(): MutableSet<String> {
+        val prefs = getPrefs().getSharedPreferences("invidious_subs", Context.MODE_PRIVATE)
+        return prefs.getStringSet("channels", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
     }
 
-    private fun addSubscription(context: Context, channelId: String) {
-        val set = getSubscriptions(context)
+    private fun addSubscription(channelId: String) {
+        val prefs = getPrefs().getSharedPreferences("invidious_subs", Context.MODE_PRIVATE)
+        val set = getSubscriptions()
         set.add(channelId)
-        getPrefs(context).edit().putStringSet("channels", set).apply()
+        prefs.edit().putStringSet("channels", set).apply()
     }
 
     // =========================
@@ -68,9 +70,8 @@ class InvidiousProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
 
         val base = getWorkingInstance()
-        val context = app.context
 
-        val subs = getSubscriptions(context)
+        val subs = getSubscriptions()
 
         val subscriptionVideos = subs.flatMap { channelId ->
             try {
@@ -111,17 +112,18 @@ class InvidiousProvider : MainAPI() {
     override suspend fun search(query: String, page: Int): SearchResponseList? {
 
         val base = getWorkingInstance()
+        val encoded = URLEncoder.encode(query, "UTF-8")
 
         val videos = tryParseJson<List<SearchEntry>>(
-            app.get("$base/api/v1/search?q=${query.encodeUri()}&page=$page&type=video&fields=videoId,title").text
+            app.get("$base/api/v1/search?q=$encoded&page=$page&type=video&fields=videoId,title").text
         )
 
         val playlists = tryParseJson<List<PlaylistEntry>>(
-            app.get("$base/api/v1/search?q=${query.encodeUri()}&page=$page&type=playlist").text
+            app.get("$base/api/v1/search?q=$encoded&page=$page&type=playlist").text
         )
 
         val channels = tryParseJson<List<ChannelEntry>>(
-            app.get("$base/api/v1/search?q=${query.encodeUri()}&page=$page&type=channel").text
+            app.get("$base/api/v1/search?q=$encoded&page=$page&type=channel").text
         )
 
         val results = mutableListOf<SearchResponse>()
@@ -180,7 +182,6 @@ class InvidiousProvider : MainAPI() {
             TvType.Movie,
             id
         ) {
-            plot = "Playlist con ${playlist.videos.size} videos"
             recommendations = playlist.videos.map {
                 it.toSearchResponse(this@InvidiousProvider)
             }
@@ -189,7 +190,7 @@ class InvidiousProvider : MainAPI() {
 
     private suspend fun loadChannel(base: String, id: String): LoadResponse? {
 
-        addSubscription(app.context, id)
+        addSubscription(id)
 
         val videos = tryParseJson<List<SearchEntry>>(
             app.get("$base/api/v1/channels/$id/videos?fields=videoId,title").text
@@ -201,7 +202,6 @@ class InvidiousProvider : MainAPI() {
             TvType.Movie,
             id
         ) {
-            plot = "Últimos videos del canal"
             recommendations = videos.map {
                 it.toSearchResponse(this@InvidiousProvider)
             }
@@ -258,37 +258,19 @@ class InvidiousProvider : MainAPI() {
                 title,
                 "${provider.mainUrl}/watch?v=$videoId",
                 TvType.Movie
-            ) {
-                posterUrl = "${provider.mainUrl}/vi/$videoId/mqdefault.jpg"
-            }
+            )
         }
     }
 
     private data class PlaylistEntry(
         val title: String,
         val playlistId: String
-    ) {
-        fun toSearchResponse(provider: InvidiousProvider): SearchResponse {
-            return provider.newMovieSearchResponse(
-                title,
-                "${provider.mainUrl}/playlist?list=$playlistId",
-                TvType.Movie
-            )
-        }
-    }
+    )
 
     private data class ChannelEntry(
         val author: String,
         val authorId: String
-    ) {
-        fun toSearchResponse(provider: InvidiousProvider): SearchResponse {
-            return provider.newMovieSearchResponse(
-                author,
-                "${provider.mainUrl}/channel/$authorId",
-                TvType.Movie
-            )
-        }
-    }
+    )
 
     private data class PlaylistResponse(
         val title: String,
