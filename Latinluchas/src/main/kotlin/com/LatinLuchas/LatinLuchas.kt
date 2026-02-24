@@ -5,15 +5,15 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.extractors.VidStack
 
 // ===============================
-// Extractor específico para Upns
+// 🔥 Extractor especial UPNS / UNS / CHERRY / BYZEKOSE
 // ===============================
 class LatinLuchaUpns : VidStack() {
-    override var name = "LatinLucha Upns"
+    override var name = "LatinLucha Server"
     override var mainUrl = "https://latinlucha.upns.online"
 }
 
 // ===============================
-// MAIN API
+// 🔥 MAIN API
 // ===============================
 class LatinLuchas : MainAPI() {
 
@@ -26,15 +26,16 @@ class LatinLuchas : MainAPI() {
     private val defaultPoster =
         "https://tv.latinluchas.com/tv/wp-content/uploads/2026/02/hq720.avif"
 
-    // ===============================
-    // HOMEPAGE (categorías reales)
-    // ===============================
+    // ==========================================
+    // 🏠 HOMEPAGE
+    // ==========================================
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
 
         val categories = listOf(
+            Pair("En Vivo Hoy", "$mainUrl/en-vivo/"),
             Pair("WWE", "$mainUrl/category/eventos/wwe/"),
             Pair("UFC", "$mainUrl/category/eventos/ufc/"),
             Pair("AEW", "$mainUrl/category/eventos/aew/"),
@@ -42,31 +43,52 @@ class LatinLuchas : MainAPI() {
             Pair("Indies", "$mainUrl/category/eventos/indies/")
         )
 
-        val homePages = categories.map { (sectionName, sectionUrl) ->
-            val doc = app.get(sectionUrl).document
+        val homePages = categories.map { (sectionName, url) ->
 
-            val items = doc.select("article, .post, .elementor-post")
-                .mapNotNull { element ->
-                    val title = element
-                        .selectFirst("h2, h3, .entry-title")
-                        ?.text()
-                        ?.trim()
-                        ?: return@mapNotNull null
+            val doc = app.get(url).document
 
-                    val href = element
-                        .selectFirst("a")
-                        ?.attr("abs:href")
-                        ?: return@mapNotNull null
+            val items = if (url.contains("/en-vivo/")) {
 
-                    val poster =
-                        element.selectFirst("img")?.attr("abs:src")
-                            ?: element.selectFirst("img")?.attr("abs:data-src")
-                            ?: defaultPoster
+                // 🔥 Extraemos los enlaces del script JS
+                val html = doc.html()
+                val regex = Regex("""href="(https://latinluchas\.com/[^"]+)"""")
 
-                    newAnimeSearchResponse(title, href, TvType.TvSeries) {
-                        this.posterUrl = poster
+                regex.findAll(html).map { match ->
+                    val link = match.groupValues[1]
+
+                    newAnimeSearchResponse(
+                        link.substringAfter("latinluchas.com/")
+                            .replace("-", " ")
+                            .uppercase(),
+                        link,
+                        TvType.TvSeries
+                    ) {
+                        this.posterUrl = defaultPoster
                     }
-                }
+                }.distinctBy { it.url }
+
+            } else {
+
+                doc.select("article, .post, .elementor-post")
+                    .mapNotNull { element ->
+                        val title = element.selectFirst("h2, h3, .entry-title")
+                            ?.text()?.trim()
+                            ?: return@mapNotNull null
+
+                        val href = element.selectFirst("a")
+                            ?.attr("abs:href")
+                            ?: return@mapNotNull null
+
+                        val poster =
+                            element.selectFirst("img")?.attr("abs:src")
+                                ?: element.selectFirst("img")?.attr("abs:data-src")
+                                ?: defaultPoster
+
+                        newAnimeSearchResponse(title, href, TvType.TvSeries) {
+                            this.posterUrl = poster
+                        }
+                    }
+            }
 
             HomePageList(sectionName, items)
         }
@@ -74,40 +96,34 @@ class LatinLuchas : MainAPI() {
         return newHomePageResponse(homePages)
     }
 
-    // ===============================
-    // LOAD (evento / repetición / en vivo)
-    // ===============================
+    // ==========================================
+    // 📄 LOAD (REPETICIONES + EN VIVO)
+    // ==========================================
     override suspend fun load(url: String): LoadResponse? {
 
         val document = app.get(url).document
+        val html = document.html()
 
         val title =
             document.selectFirst("h1.entry-title")
                 ?.text()?.trim()
-                ?: document.selectFirst("meta[property=og:title]")
-                    ?.attr("content")
-                    ?.substringBefore(" - LATINLUCHAS")
-                ?: "Evento"
+                ?: "LatinLuchas"
 
         val poster =
             document.selectFirst("meta[property=og:image]")
                 ?.attr("content")
                 ?: defaultPoster
 
-        val plot =
-            document.selectFirst("meta[property=og:description]")
-                ?.attr("content")
-
         val episodes = mutableListOf<Episode>()
 
-        // ============================
-        // 🟢 REPETICIONES (btn-video)
-        // ============================
+        // =====================================
+        // 🔥 CASO 1: REPETICIONES (botones OPCION)
+        // =====================================
         document.select("a.btn-video").forEach { anchor ->
-            val name = anchor.text().trim()
             val link = anchor.attr("abs:href")
+            val name = anchor.text().trim()
 
-            if (link.isNotBlank() && !name.contains("DESCARGA", true)) {
+            if (!link.contains("descarga", true)) {
                 episodes.add(
                     newEpisode(link) {
                         this.name = name
@@ -116,31 +132,34 @@ class LatinLuchas : MainAPI() {
             }
         }
 
-        // ============================
-        // 🟡 EN VIVO (button-es / en)
-        // ============================
+        // =====================================
+        // 🔥 CASO 2: EN VIVO (extraer del script JS)
+        // =====================================
         if (episodes.isEmpty()) {
-            document.select("a.button-es, a.button-en").forEach { anchor ->
-                val name = anchor.text().trim()
-                val link = anchor.attr("abs:href")
 
-                if (link.isNotBlank()) {
-                    episodes.add(
-                        newEpisode(link) {
-                            this.name = name
-                        }
-                    )
-                }
+            val regex = Regex("""href="(https://latinluchas\.com/[^"]+)"""")
+
+            regex.findAll(html).forEach { match ->
+                val link = match.groupValues[1]
+
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = link
+                            .substringAfter("latinluchas.com/")
+                            .replace("-", " ")
+                            .uppercase()
+                    }
+                )
             }
         }
 
-        // ============================
-        // 🔴 CANAL DIRECTO
-        // ============================
+        // =====================================
+        // SI NO HAY NADA
+        // =====================================
         if (episodes.isEmpty()) {
             episodes.add(
                 newEpisode(url) {
-                    this.name = "VER CANAL"
+                    this.name = "Próximamente"
                 }
             )
         }
@@ -152,13 +171,12 @@ class LatinLuchas : MainAPI() {
             episodes.distinctBy { it.data }
         ) {
             this.posterUrl = poster
-            this.plot = plot
         }
     }
 
-    // ===============================
-    // LOAD LINKS (reproductor real)
-    // ===============================
+    // ==========================================
+    // 🔗 LOAD LINKS (SERVIDORES)
+    // ==========================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -167,32 +185,39 @@ class LatinLuchas : MainAPI() {
     ): Boolean {
 
         val document = app.get(data).document
-        var found = false
 
         document.select("iframe").forEach { iframe ->
+
             var src = iframe.attr("abs:src")
                 .ifBlank { iframe.attr("abs:data-src") }
                 .ifBlank { iframe.attr("src") }
 
             if (src.isBlank()) return@forEach
-
-            if (src.startsWith("//"))
-                src = "https:$src"
+            if (src.startsWith("//")) src = "https:$src"
 
             when {
-                src.contains("upns.online") -> {
-                    LatinLuchaUpns().getUrl(src, data, subtitleCallback, callback)
-                    found = true
+
+                // 🔥 BYZEKOSE / UPNS / UNS / CHERRY
+                src.contains("upns", true) ||
+                src.contains("uns.wtf", true) ||
+                src.contains("cherry", true) ||
+                src.contains("byzekose", true) -> {
+
+                    LatinLuchaUpns().getUrl(
+                        src,
+                        data,
+                        subtitleCallback,
+                        callback
+                    )
                 }
 
+                // OK.RU y otros soportados por Cloudstream
                 else -> {
-                    if (loadExtractor(src, data, subtitleCallback, callback)) {
-                        found = true
-                    }
+                    loadExtractor(src, data, subtitleCallback, callback)
                 }
             }
         }
 
-        return found
+        return true
     }
 }
