@@ -35,40 +35,46 @@ class LatinLuchas : MainAPI() {
 ): HomePageResponse? {
 
     val categories = listOf(
-        Pair("En Vivo Hoy", "$mainUrl/en-vivo/"),
-        Pair("WWE", "$mainUrl/category/eventos/wwe/"),
-        Pair("UFC", "$mainUrl/category/eventos/ufc/"),
-        Pair("AEW", "$mainUrl/category/eventos/aew/"),
-        Pair("Lucha Libre Mexicana", "$mainUrl/category/eventos/lucha-libre-mexicana/"),
-        Pair("Indies", "$mainUrl/category/eventos/indies/")
+        "En Vivo Hoy" to "$mainUrl/en-vivo/",
+        "WWE" to "$mainUrl/category/eventos/wwe/",
+        "UFC" to "$mainUrl/category/eventos/ufc/",
+        "AEW" to "$mainUrl/category/eventos/aew/",
+        "Lucha Libre Mexicana" to "$mainUrl/category/eventos/lucha-libre-mexicana/",
+        "Indies" to "$mainUrl/category/eventos/indies/"
     )
 
-    val homePages = categories.map { (sectionName, url) ->
+    val homePages = mutableListOf<HomePageList>()
+
+    for ((sectionName, url) in categories) {
 
         val doc = app.get(url).document
         val html = doc.html()
 
-        val items: List<SearchResponse> = if (url.contains("/en-vivo/")) {
+        val items: List<SearchResponse>
+
+        if (url.contains("/en-vivo/")) {
 
             val regex = Regex("""href="(https://latinluchas\.com/[^"]+)"""")
 
-            regex.findAll(html).mapNotNull { match ->
-                val link = match.groupValues.getOrNull(1) ?: return@mapNotNull null
+            items = regex.findAll(html)
+                .mapNotNull { match ->
+                    val link = match.groupValues.getOrNull(1) ?: return@mapNotNull null
 
-                newAnimeSearchResponse(
-                    link.substringAfter("latinluchas.com/")
-                        .replace("-", " ")
-                        .uppercase(),
-                    link,
-                    TvType.TvSeries
-                ) {
-                    this.posterUrl = defaultPoster
+                    newAnimeSearchResponse(
+                        link.substringAfter("latinluchas.com/")
+                            .replace("-", " ")
+                            .uppercase(),
+                        link,
+                        TvType.TvSeries
+                    ) {
+                        this.posterUrl = defaultPoster
+                    }
                 }
-            }.distinctBy { it.url }
+                .distinctBy { it.url }
 
         } else {
 
-            doc.select("article, .post, .elementor-post")
+            items = doc.select("article, .post, .elementor-post")
                 .mapNotNull { element ->
                     val title = element.selectFirst("h2, h3, .entry-title")
                         ?.text()?.trim()
@@ -89,7 +95,7 @@ class LatinLuchas : MainAPI() {
                 }
         }
 
-        HomePageList(sectionName, items)
+        homePages.add(HomePageList(sectionName, items))
     }
 
     return newHomePageResponse(homePages)
