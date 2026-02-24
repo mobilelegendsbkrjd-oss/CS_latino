@@ -4,12 +4,17 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.extractors.VidStack
 
-// --- Extractor específico para Canal Upns ---
+// ===============================
+// Extractor específico para Upns
+// ===============================
 class LatinLuchaUpns : VidStack() {
     override var name = "LatinLucha Upns"
     override var mainUrl = "https://latinlucha.upns.online"
 }
 
+// ===============================
+// MAIN API
+// ===============================
 class LatinLuchas : MainAPI() {
 
     override var mainUrl = "https://latinluchas.com"
@@ -21,48 +26,14 @@ class LatinLuchas : MainAPI() {
     private val defaultPoster =
         "https://tv.latinluchas.com/tv/wp-content/uploads/2026/02/hq720.avif"
 
-    // ==============================
-    // 🔴 HOMEPAGE
-    // ==============================
+    // ===============================
+    // HOMEPAGE (categorías reales)
+    // ===============================
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
 
-        val homeSections = mutableListOf<HomePageList>()
-
-        // ==============================
-        // 🔴 SECCIÓN EN VIVO HOY
-        // ==============================
-        try {
-            val liveDoc = app.get("$mainUrl/en-vivo/").document
-
-            val title =
-                liveDoc.selectFirst("meta[property=og:title]")?.attr("content")
-                    ?.substringBefore(" - LATINLUCHAS")
-                    ?: "Evento en Vivo"
-
-            val poster =
-                liveDoc.selectFirst("meta[property=og:image]")?.attr("content")
-                    ?: defaultPoster
-
-            val liveItem = newAnimeSearchResponse(
-                title,
-                "$mainUrl/en-vivo/",
-                TvType.TvSeries
-            ) {
-                this.posterUrl = poster
-            }
-
-            homeSections.add(
-                HomePageList("🔴 EN VIVO HOY", listOf(liveItem))
-            )
-        } catch (_: Exception) {
-        }
-
-        // ==============================
-        // 📂 CATEGORÍAS NORMALES (REPETICIONES)
-        // ==============================
         val categories = listOf(
             Pair("WWE", "$mainUrl/category/eventos/wwe/"),
             Pair("UFC", "$mainUrl/category/eventos/ufc/"),
@@ -71,42 +42,43 @@ class LatinLuchas : MainAPI() {
             Pair("Indies", "$mainUrl/category/eventos/indies/")
         )
 
-        categories.forEach { (catName, url) ->
-            try {
-                val doc = app.get(url).document
-                val items = doc.select("article, .post, .elementor-post")
-                    .mapNotNull { element ->
-                        val title =
-                            element.selectFirst("h2, h3, .entry-title")
-                                ?.text()?.trim()
-                                ?: return@mapNotNull null
+        val homePages = categories.map { (sectionName, sectionUrl) ->
+            val doc = app.get(sectionUrl).document
 
-                        val href =
-                            element.selectFirst("a")?.attr("abs:href")
-                                ?: return@mapNotNull null
+            val items = doc.select("article, .post, .elementor-post")
+                .mapNotNull { element ->
+                    val title = element
+                        .selectFirst("h2, h3, .entry-title")
+                        ?.text()
+                        ?.trim()
+                        ?: return@mapNotNull null
 
-                        val poster =
-                            element.selectFirst("img")?.attr("abs:src")
-                                ?: element.selectFirst("img")?.attr("abs:data-src")
-                                ?: defaultPoster
+                    val href = element
+                        .selectFirst("a")
+                        ?.attr("abs:href")
+                        ?: return@mapNotNull null
 
-                        newAnimeSearchResponse(title, href, TvType.TvSeries) {
-                            this.posterUrl = poster
-                        }
+                    val poster =
+                        element.selectFirst("img")?.attr("abs:src")
+                            ?: element.selectFirst("img")?.attr("abs:data-src")
+                            ?: defaultPoster
+
+                    newAnimeSearchResponse(title, href, TvType.TvSeries) {
+                        this.posterUrl = poster
                     }
+                }
 
-                homeSections.add(HomePageList(catName, items))
-            } catch (_: Exception) {
-            }
+            HomePageList(sectionName, items)
         }
 
-        return newHomePageResponse(homeSections)
+        return newHomePageResponse(homePages)
     }
 
-    // ==============================
-    // 📺 LOAD (REPETICIONES + EN VIVO)
-    // ==============================
+    // ===============================
+    // LOAD (evento / repetición / en vivo)
+    // ===============================
     override suspend fun load(url: String): LoadResponse? {
+
         val document = app.get(url).document
 
         val title =
@@ -126,32 +98,67 @@ class LatinLuchas : MainAPI() {
             document.selectFirst("meta[property=og:description]")
                 ?.attr("content")
 
-        // ==============================
-        // 🎥 SOLO BOTONES REALES DE VIDEO
-        // ==============================
-        val episodes = document
-            .select("a.btn-video")
-            .mapNotNull { anchor ->
+        val episodes = mutableListOf<Episode>()
+
+        // ============================
+        // 🟢 REPETICIONES (btn-video)
+        // ============================
+        document.select("a.btn-video").forEach { anchor ->
+            val name = anchor.text().trim()
+            val link = anchor.attr("abs:href")
+
+            if (link.isNotBlank() && !name.contains("DESCARGA", true)) {
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = name
+                    }
+                )
+            }
+        }
+
+        // ============================
+        // 🟡 EN VIVO (button-es / en)
+        // ============================
+        if (episodes.isEmpty()) {
+            document.select("a.button-es, a.button-en").forEach { anchor ->
                 val name = anchor.text().trim()
                 val link = anchor.attr("abs:href")
 
-                if (link.isBlank() || name.contains("DESCARGA", true))
-                    null
-                else newEpisode(link) {
-                    this.name = name
+                if (link.isNotBlank()) {
+                    episodes.add(
+                        newEpisode(link) {
+                            this.name = name
+                        }
+                    )
                 }
             }
-            .distinctBy { it.data }
+        }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+        // ============================
+        // 🔴 CANAL DIRECTO
+        // ============================
+        if (episodes.isEmpty()) {
+            episodes.add(
+                newEpisode(url) {
+                    this.name = "VER CANAL"
+                }
+            )
+        }
+
+        return newTvSeriesLoadResponse(
+            title,
+            url,
+            TvType.TvSeries,
+            episodes.distinctBy { it.data }
+        ) {
             this.posterUrl = poster
             this.plot = plot
         }
     }
 
-    // ==============================
-    // 🔗 LOAD LINKS
-    // ==============================
+    // ===============================
+    // LOAD LINKS (reproductor real)
+    // ===============================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -160,6 +167,7 @@ class LatinLuchas : MainAPI() {
     ): Boolean {
 
         val document = app.get(data).document
+        var found = false
 
         document.select("iframe").forEach { iframe ->
             var src = iframe.attr("abs:src")
@@ -167,17 +175,24 @@ class LatinLuchas : MainAPI() {
                 .ifBlank { iframe.attr("src") }
 
             if (src.isBlank()) return@forEach
-            if (src.startsWith("//")) src = "https:$src"
+
+            if (src.startsWith("//"))
+                src = "https:$src"
 
             when {
                 src.contains("upns.online") -> {
                     LatinLuchaUpns().getUrl(src, data, subtitleCallback, callback)
+                    found = true
                 }
 
-                else -> loadExtractor(src, data, subtitleCallback, callback)
+                else -> {
+                    if (loadExtractor(src, data, subtitleCallback, callback)) {
+                        found = true
+                    }
+                }
             }
         }
 
-        return true
+        return found
     }
 }
