@@ -6,12 +6,12 @@ import com.lagradost.cloudstream3.extractors.VidStack
 import org.json.JSONObject
 
 // ===============================
-// Extractor Bysekoze Integrado
+// Bysekoze Extractor integrado
 // ===============================
 class Bysekoze : ExtractorApi() {
 
-    override var name = "Bysekoze"
-    override var mainUrl = "https://bysekoze.com"
+    override val name = "Bysekoze"
+    override val mainUrl = "https://bysekoze.com"
     override val requiresReferer = true
 
     override suspend fun getUrl(
@@ -98,9 +98,9 @@ class Bysekoze : ExtractorApi() {
 // ===============================
 class LatinLuchas : MainAPI() {
 
-    override var mainUrl = "https://latinluchas.com"
-    override var name = "LatinLuchas"
-    override var lang = "es"
+    override val mainUrl = "https://latinluchas.com"
+    override val name = "LatinLuchas"
+    override val lang = "es"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie)
 
@@ -113,11 +113,11 @@ class LatinLuchas : MainAPI() {
     ): HomePageResponse? {
 
         val categories = listOf(
-            Pair("WWE", "$mainUrl/category/eventos/wwe/"),
-            Pair("UFC", "$mainUrl/category/eventos/ufc/"),
-            Pair("AEW", "$mainUrl/category/eventos/aew/"),
-            Pair("Lucha Libre Mexicana", "$mainUrl/category/eventos/lucha-libre-mexicana/"),
-            Pair("Indies", "$mainUrl/category/eventos/indies/")
+            "WWE" to "$mainUrl/category/eventos/wwe/",
+            "UFC" to "$mainUrl/category/eventos/ufc/",
+            "AEW" to "$mainUrl/category/eventos/aew/",
+            "Lucha Libre Mexicana" to "$mainUrl/category/eventos/lucha-libre-mexicana/",
+            "Indies" to "$mainUrl/category/eventos/indies/"
         )
 
         val home = categories.map { (catName, url) ->
