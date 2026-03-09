@@ -7,7 +7,7 @@ cloudstream {
 
     description = "(Mexican) Anime Extension"
     language    = "mx"
-    authors = listOf("bkrjd")
+    authors = listOf("Phisher98")
 
     /**
     * Status int as the following:

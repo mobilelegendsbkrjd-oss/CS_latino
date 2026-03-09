@@ -40,9 +40,9 @@ class Animeav1 : MainAPI() {
     override val supportedTypes       = setOf(TvType.Anime, TvType.AnimeMovie)
 
     override val mainPage = mainPageOf(
-        "catalogo?status=emision" to "Emision",
+        "catalogo?status=emision" to "Emisión",
         "catalogo?status=finalizado" to "Finalizado",
-        "catalogo?category=pelicula" to "Pelicula",
+        "catalogo?category=pelicula" to "Película",
         "catalogo?category=ova" to "OVA",
     )
 
@@ -179,12 +179,14 @@ class Animeav1 : MainAPI() {
                 return list
             }
 
-            val subEmbeds = extractLinks("SUB")
+            // PROCESAR PRIMERO DUB (DOBLADO), LUEGO SUB (SUBTITULADO)
             val dubEmbeds = extractLinks("DUB")
+            val subEmbeds = extractLinks("SUB")
 
-            subEmbeds.forEach { (server, url) ->
+            // Procesar enlaces doblados primero
+            dubEmbeds.forEach { (server, url) ->
                 loadCustomExtractor(
-                    "Animeav1 [SUB:$server]",
+                    "Animeav1 [DUB:$server]",
                     url,
                     "",
                     subtitleCallback,
@@ -192,9 +194,10 @@ class Animeav1 : MainAPI() {
                 )
             }
 
-            dubEmbeds.forEach { (server, url) ->
+            // Procesar enlaces subtitulados después
+            subEmbeds.forEach { (server, url) ->
                 loadCustomExtractor(
-                    "Animeav1 [DUB:$server]",
+                    "Animeav1 [SUB:$server]",
                     url,
                     "",
                     subtitleCallback,
