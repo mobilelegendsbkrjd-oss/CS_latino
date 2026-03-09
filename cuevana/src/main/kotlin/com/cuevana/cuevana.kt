@@ -414,33 +414,19 @@ class Cuevana : MainAPI() {
 
             suspend fun process(v: VideoInfo) {
 
-                val embedUrl = v.result ?: return
+            val embedUrl = v.result ?: return
 
-                val embedDoc = app.get(embedUrl, referer = data).document
+            val finalUrl = StreamflixResolver.resolve(embedUrl, data)
 
-                val scripts = embedDoc.select("script")
+            if (!finalUrl.isNullOrBlank()) {
 
-                var finalUrl: String? = null
+                val clean = fixESP(finalUrl)
 
-                for (s in scripts) {
-
-                    val extracted = extractFinalVideo(s.data())
-
-                    if (extracted != null) {
-                        finalUrl = extracted
-                        break
-                    }
-                }
-
-                if (!finalUrl.isNullOrBlank()) {
-
-                    val clean = fixESP(finalUrl)
-
-                    if (loadExtractor(clean, data, subtitleCallback, callback)) {
-                        found = true
-                    }
+                if (loadExtractor(clean, data, subtitleCallback, callback)) {
+                    found = true
                 }
             }
+        }
 
             videos.latino?.forEach { process(it) }
             videos.spanish?.forEach { process(it) }
@@ -451,3 +437,4 @@ class Cuevana : MainAPI() {
         return found
     }
 }
+
