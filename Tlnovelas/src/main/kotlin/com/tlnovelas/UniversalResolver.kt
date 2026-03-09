@@ -22,7 +22,7 @@ object UniversalResolver {
 
         try {
 
-            // PRIMER INTENTO: extractor nativo Cloudstream
+            // intento 1 extractor nativo
             success = success || loadExtractor(url, referer, subtitleCallback, callback)
 
             when {
@@ -37,30 +37,11 @@ object UniversalResolver {
                 url.contains("bysejikuar") ||
                 url.contains("f75s") -> {
 
-                    // INTENTO 2: loadExtractor con headers reales
-                    success = success || loadExtractor(
-                        url,
-                        referer,
-                        subtitleCallback,
-                        callback,
-                        headers = mapOf(
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-                            "Referer" to url,
-                            "Origin" to "https://f75s.com",
-                            "Accept" to "*/*",
-                            "X-Embed-Origin" to "ww2.tlnovelas.net",
-                            "X-Embed-Parent" to url,
-                            "X-Embed-Referer" to referer
-                        )
-                    )
-
-                    // INTENTO 3: extractor custom
-                    if (!success) {
-                        success = success || extractBysejikuar(url, referer, callback)
-                    }
+                    success = success || extractBysejikuar(url, referer, callback)
                 }
 
                 else -> {
+
                     success = success || tryResolveGeneric(url, referer, callback)
                 }
             }
@@ -179,6 +160,12 @@ object UniversalResolver {
                     .embed_frame_url
                     ?: return false
 
+            // truco anti challenge
+            try {
+                app.get(embedUrl, referer = referer)
+                app.get(embedFrame, referer = embedUrl)
+            } catch (_: Exception) {}
+
             val playbackText =
                 app.get(
                     "$base/api/videos/$id/embed/playback",
@@ -253,8 +240,7 @@ object UniversalResolver {
                 referer = referer,
                 headers = mapOf(
                     "User-Agent" to "Mozilla/5.0",
-                    "Referer" to referer,
-                    "Accept" to "*/*"
+                    "Referer" to referer
                 )
             )
 
@@ -277,6 +263,12 @@ object UniversalResolver {
                 Gson().fromJson(detailsText, DetailsResponse::class.java)
 
             val embedFrame = details.embed_frame_url ?: embedUrl
+
+            // truco anti challenge
+            try {
+                app.get(embedUrl, referer = referer)
+                app.get(embedFrame, referer = embedUrl)
+            } catch (_: Exception) {}
 
             val playbackBase =
                 if (embedFrame.contains("f75"))
@@ -322,11 +314,7 @@ object UniversalResolver {
                 src.url?.let { videoUrl ->
 
                     callback.invoke(
-                        newExtractorLink(
-                            "Bysejikuar",
-                            "Bysejikuar",
-                            videoUrl
-                        ) {
+                        newExtractorLink("Bysejikuar","Bysejikuar",videoUrl) {
                             this.referer = embedFrame
                             this.quality = 0
                             this.type =
