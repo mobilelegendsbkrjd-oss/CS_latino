@@ -1,4 +1,5 @@
 package com.tlnovelas
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
@@ -126,8 +127,23 @@ class Tlnovelas : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(data).text
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer" to mainUrl,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Sec-Fetch-Mode" to "navigate"
+        )
+        val res = app.get(data, headers = headers)
+        val response = res.text
+        val document = res.document
         val videoLinks = mutableSetOf<String>()
+        // Iframes using jsoup
+        document.select("iframe[src]").forEach {
+            val link = it.attr("src")
+            if (!link.contains("google") && link.startsWith("http")) {
+                videoLinks.add(link)
+            }
+        }
         // 1️⃣ e[]
         Regex("""e\[(\d+)\]\s*=\s*['"]([^'"]+)['"]""")
             .findAll(response)
@@ -148,14 +164,6 @@ class Tlnovelas : MainAPI() {
                     decodeVideoUrl(it.trim().trim('\'', '"'))
                 if (decoded.startsWith("http"))
                     videoLinks.add(decoded)
-            }
-        // 3️⃣ iframe
-        Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE)
-            .findAll(response)
-            .forEach {
-                val link = it.groupValues[1]
-                if (!link.contains("google"))
-                    videoLinks.add(link)
             }
         // 4️⃣ m3u8 directo
         Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""")
