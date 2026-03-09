@@ -373,26 +373,6 @@ class Cuevana : MainAPI() {
         var found = false
         val doc = app.get(data, headers = requestHeaders).document
 
-        fun extractFinalVideo(script: String): String? {
-
-            Regex("var\\s*url\\s*=\\s*['\"](.*?)['\"]")
-                .find(script)?.groupValues?.get(1)?.let { return it }
-
-            Regex("window\\.location\\.href\\s*=\\s*['\"](.*?)['\"]")
-                .find(script)?.groupValues?.get(1)?.let { return it }
-
-            Regex("location\\.replace\\(['\"](.*?)['\"]")
-                .find(script)?.groupValues?.get(1)?.let { return it }
-
-            Regex("sources:\\s*\\[\\{file:\\s*['\"](.*?)['\"]")
-                .find(script)?.groupValues?.get(1)?.let { return it }
-
-            Regex("file:\\s*['\"](https?://.*?)['\"]")
-                .find(script)?.groupValues?.get(1)?.let { return it }
-
-            return null
-        }
-
         fun fixESP(url: String): String = url.replace("\\/", "/")
             .replace("mivalyo.com", "vidhidepro.com")
             .replace("dinisglows.com", "vidhidepro.com")
@@ -414,19 +394,19 @@ class Cuevana : MainAPI() {
 
             suspend fun process(v: VideoInfo) {
 
-            val embedUrl = v.result ?: return
+                val embedUrl = v.result ?: return
 
-            val finalUrl = StreamflixResolver.resolve(embedUrl, data)
+                val finalUrl = StreamflixResolver.resolve(embedUrl, data)
 
-            if (!finalUrl.isNullOrBlank()) {
+                if (!finalUrl.isNullOrBlank()) {
 
-                val clean = fixESP(finalUrl)
+                    val clean = fixESP(finalUrl)
 
-                if (loadExtractor(clean, data, subtitleCallback, callback)) {
-                    found = true
+                    if (loadExtractor(clean, data, subtitleCallback, callback)) {
+                        found = true
+                    }
                 }
             }
-        }
 
             videos.latino?.forEach { process(it) }
             videos.spanish?.forEach { process(it) }
@@ -437,4 +417,5 @@ class Cuevana : MainAPI() {
         return found
     }
 }
+
 
