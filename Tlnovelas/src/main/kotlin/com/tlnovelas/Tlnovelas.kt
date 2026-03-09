@@ -11,7 +11,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import com.google.gson.Gson
 import com.lagradost.cloudstream3.utils.JsUnpacker
-import com.lagradost.cloudstream3.utils.ExtractorLinkType  // Añadir esta importación
+import com.lagradost.cloudstream3.Qualities
 
 class Tlnovelas : MainAPI() {
     override var mainUrl = "https://ww2.tlnovelas.net"
@@ -127,16 +127,14 @@ class Tlnovelas : MainAPI() {
             val sources = Gson().fromJson(decrypted, DecryptedPlayback::class.java).sources ?: return false
             
             sources.firstOrNull()?.url?.let { sourceUrl ->
-                // Usar el constructor directamente en lugar de newExtractorLink
                 callback.invoke(
                     ExtractorLink(
-                        "Bysejikuar",  // source
-                        "Bysejikuar",  // name
-                        sourceUrl,      // url
-                        referer,        // referer
-                        -1,             // quality (Unknown)
-                        sourceUrl.contains(".m3u8"),  // isM3u8
-                        mapOf()         // headers vacío
+                        "Bysejikuar",
+                        "Bysejikuar",
+                        sourceUrl,
+                        referer,
+                        Qualities.Unknown.value,
+                        sourceUrl.contains(".m3u8")
                     )
                 )
                 true
@@ -173,16 +171,14 @@ class Tlnovelas : MainAPI() {
             val docText = app.get(embedUrl, headers = mapOf("Referer" to referer)).text
             val source = Regex("""sources:\s*\[\{file:\s*"([^"]+)"""").find(docText)?.groupValues?.get(1) ?: return false
             
-            // Usar el constructor directamente
             callback.invoke(
                 ExtractorLink(
-                    "LuluVdo",      // source
-                    "LuluVdo",      // name
-                    source,          // url
-                    referer,         // referer
-                    -1,              // quality (Unknown)
-                    source.contains(".m3u8"),  // isM3u8
-                    mapOf()          // headers vacío
+                    "LuluVdo",
+                    "LuluVdo",
+                    source,
+                    referer,
+                    Qualities.Unknown.value,
+                    source.contains(".m3u8")
                 )
             )
             
@@ -217,13 +213,6 @@ class Tlnovelas : MainAPI() {
         Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(response).forEach {
             val link = it.groupValues[1]
             if (!link.contains("google") && !link.contains("adskeeper")) videoLinks.add(link)
-        }
-
-        // Procesar cada link con loadExtractor
-        videoLinks.forEach { link ->
-            try {
-                loadExtractor(link, data, subtitleCallback, callback)
-            } catch (_: Exception) {}
         }
 
         // Detectar reproductores JS modernos
