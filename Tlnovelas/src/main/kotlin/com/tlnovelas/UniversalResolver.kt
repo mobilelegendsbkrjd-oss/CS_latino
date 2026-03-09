@@ -1,5 +1,6 @@
 package com.tlnovelas
 
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import com.google.gson.Gson
@@ -21,7 +22,6 @@ object UniversalResolver {
 
         try {
 
-            // Primero intentar extractores nativos
             if (loadExtractor(url, referer, subtitleCallback, callback)) {
                 success = true
             }
@@ -48,10 +48,6 @@ object UniversalResolver {
 
         return success
     }
-
-    // =========================
-    // GENERIC PLAYER RESOLVER
-    // =========================
 
     private suspend fun tryResolveGeneric(
         url: String,
@@ -104,10 +100,6 @@ object UniversalResolver {
         }
     }
 
-    // =========================
-    // HQQ / WAAW / NETU
-    // =========================
-
     private suspend fun extractHqq(
         embedUrl: String,
         referer: String,
@@ -134,7 +126,7 @@ object UniversalResolver {
                 "$base/api/videos/$id/embed/playback",
                 headers = mapOf(
                     "Referer" to embedFrame,
-                    "User-Agent" to USER_AGENT
+                    "User-Agent" to "Mozilla/5.0"
                 )
             ).text
 
@@ -198,10 +190,6 @@ object UniversalResolver {
         }
     }
 
-    // =========================
-    // BYSEJIKUAR
-    // =========================
-
     private suspend fun extractBysejikuar(
         embedUrl: String,
         referer: String,
@@ -228,7 +216,7 @@ object UniversalResolver {
                 "$base/api/videos/$id/embed/playback",
                 headers = mapOf(
                     "Referer" to embedFrame,
-                    "User-Agent" to USER_AGENT
+                    "User-Agent" to "Mozilla/5.0"
                 )
             ).text
 
@@ -265,35 +253,15 @@ object UniversalResolver {
         }
     }
 
-    // =========================
-    // UTIL
-    // =========================
-
     private fun pad(s: String): String {
         var str = s
         while (str.length % 4 != 0) str += "="
         return str
     }
 
-    data class DetailsResponse(
-        val embed_frame_url: String?
-    )
-
-    data class PlaybackResponse(
-        val playback: PlaybackData?
-    )
-
-    data class PlaybackData(
-        val iv: String,
-        val payload: String,
-        val key_parts: List<String>
-    )
-
-    data class DecryptedPlayback(
-        val sources: List<DecryptedSource>?
-    )
-
-    data class DecryptedSource(
-        val url: String?
-    )
+    data class DetailsResponse(val embed_frame_url: String?)
+    data class PlaybackResponse(val playback: PlaybackData?)
+    data class PlaybackData(val iv: String, val payload: String, val key_parts: List<String>)
+    data class DecryptedPlayback(val sources: List<DecryptedSource>?)
+    data class DecryptedSource(val url: String?)
 }
