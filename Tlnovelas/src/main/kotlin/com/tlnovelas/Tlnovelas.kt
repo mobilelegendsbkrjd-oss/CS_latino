@@ -11,7 +11,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import com.google.gson.Gson
 import com.lagradost.cloudstream3.utils.JsUnpacker
-import com.lagradost.cloudstream3.utils.Resolver // Importar el resolver universal
+import com.lagradost.cloudstream3.utils.QUALITIES  // CORREGIDO: Importar QUALITIES en lugar de Qualities
 
 class Tlnovelas : MainAPI() {
     override var mainUrl = "https://ww2.tlnovelas.net"
@@ -48,7 +48,7 @@ class Tlnovelas : MainAPI() {
         }
 
         return newTvSeriesSearchResponse(title, fixUrl(href), TvType.TvSeries) {
-            posterUrl = poster
+            this.posterUrl = poster
         }
     }
 
@@ -78,8 +78,8 @@ class Tlnovelas : MainAPI() {
         }.distinctBy { it.data }.reversed()
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            posterUrl = poster
-            plot = finalDoc.selectFirst(".card-text, .ani-description")?.text()
+            this.posterUrl = poster
+            this.plot = finalDoc.selectFirst(".card-text, .ani-description")?.text()
         }
     }
 
@@ -127,7 +127,13 @@ class Tlnovelas : MainAPI() {
             val sources = Gson().fromJson(decrypted, DecryptedPlayback::class.java).sources ?: return false
             
             sources.firstOrNull()?.url?.let { sourceUrl ->
-                callback.invoke(ExtractorLink("Bysejikuar", "Bysejikuar", sourceUrl, referer, Qualities.Unknown.value, sourceUrl.contains(".m3u8")))
+                // CORREGIDO: Usar newExtractorLink en lugar del constructor deprecado
+                callback.invoke(
+                    newExtractorLink("Bysejikuar", "Bysejikuar", sourceUrl, referer) {
+                        this.quality = QUALITIES.Unknown.value
+                        this.isM3u8 = sourceUrl.contains(".m3u8")
+                    }
+                )
                 true
             } ?: false
         } catch (e: Exception) { false }
@@ -162,11 +168,17 @@ class Tlnovelas : MainAPI() {
             val docText = app.get(embedUrl, headers = mapOf("Referer" to referer)).text
             val source = Regex("""sources:\s*\[\{file:\s*"([^"]+)"""").find(docText)?.groupValues?.get(1) ?: return false
             
-            callback.invoke(ExtractorLink("LuluVdo", "LuluVdo", source, referer, Qualities.Unknown.value, source.contains(".m3u8")))
+            // CORREGIDO: Usar newExtractorLink
+            callback.invoke(
+                newExtractorLink("LuluVdo", "LuluVdo", source, referer) {
+                    this.quality = QUALITIES.Unknown.value
+                    this.isM3u8 = source.contains(".m3u8")
+                }
+            )
             
             Regex("""file:\s*"([^"]+)",\s*label:\s*"([^"]+)"""").findAll(docText).forEach {
                 val label = it.groupValues[2]
-                if (label.lowercase() != "upload captions") subtitleCallback(SubtitleFile(it.groupValues[1], label))
+                if (label.lowercase() != "upload captions") subtitleCallback(SubtitleFile(label, it.groupValues[1]))
             }
             true
         } catch (e: Exception) { false }
@@ -197,26 +209,13 @@ class Tlnovelas : MainAPI() {
             if (!link.contains("google") && !link.contains("adskeeper")) videoLinks.add(link)
         }
 
-        // ===== CAMBIO CLAVE: Nuevo bloque con Resolver =====
+        // Procesar cada link con loadExtractor
         videoLinks.forEach { link ->
             try {
-                // intento normal
-                if (loadExtractor(link, data, subtitleCallback, callback)) {
-                    // success = true  // No asignamos aquí para no cortar el flujo
-                }
-
-                // nuevo resolver universal
-                val resolved = Resolver.resolve(link, data)
-
-                if (resolved != null) {
-                    if (loadExtractor(resolved, data, subtitleCallback, callback)) {
-                        // success = true
-                    }
-                }
+                loadExtractor(link, data, subtitleCallback, callback)
             } catch (_: Exception) {}
         }
 
-        // ===== SEGUNDO CAMBIO: Detección de JS moderno antes del return =====
         // Detectar reproductores JS modernos
         Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)""")
             .find(response)?.groupValues?.get(1)?.let { videoLinks.add(it) }
