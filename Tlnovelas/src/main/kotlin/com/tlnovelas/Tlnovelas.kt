@@ -10,6 +10,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import com.google.gson.Gson
+import com.lagradost.cloudstream3.utils.JsUnpacker // Asegúrate de importar JsUnpacker
 
 class Tlnovelas : MainAPI() {
     override var mainUrl = "https://ww2.tlnovelas.net"
@@ -193,6 +194,37 @@ class Tlnovelas : MainAPI() {
         Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(response).forEach {
             val link = it.groupValues[1]
             if (!link.contains("google") && !link.contains("adskeeper")) videoLinks.add(link)
+        }
+
+        // ===== NUEVAS MEJORAS PARA CAPÍTULOS NUEVOS =====
+        
+        // Buscar video en scripts JS (nuevo sistema)
+        Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)""")
+            .find(response)?.groupValues?.get(1)?.let { videoLinks.add(it) }
+
+        Regex("""file\s*:\s*["'](https?://[^"']+)""")
+            .findAll(response).forEach {
+                videoLinks.add(it.groupValues[1])
+            }
+
+        Regex("""window\.location\.href\s*=\s*["']([^"']+)""")
+            .find(response)?.groupValues?.get(1)?.let { videoLinks.add(it) }
+
+        // Unpacker JS para código empaquetado (muy importante)
+        if (response.contains("eval(function(p,a,c,k,e")) {
+            val unpacker = JsUnpacker(response)
+            if (unpacker.detect()) {
+                val unpacked = unpacker.unpack()
+                unpacked?.let {
+                    Regex("""file\s*:\s*["'](https?://[^"']+)""")
+                        .findAll(it).forEach { m -> videoLinks.add(m.groupValues[1]) }
+                }
+            }
+        }
+
+        // También buscar enlaces directos m3u8 en el texto
+        Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""").findAll(response).forEach {
+            videoLinks.add(it.groupValues[1])
         }
 
         var success = false
