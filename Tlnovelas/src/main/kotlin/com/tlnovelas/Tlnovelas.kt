@@ -226,23 +226,21 @@ class Tlnovelas : MainAPI() {
 
             try {
 
-                if (loadExtractor(link, data, subtitleCallback, callback)) {
+                if (UniversalResolver.resolve(
+                        link,
+                        data,
+                        subtitleCallback,
+                        callback
+                    )
+                ) {
                     success = true
                 }
 
-                val resolved =
-                    StreamflixResolver.resolve(link, data)
-
-                if (resolved != null) {
-
-                    if (loadExtractor(resolved, data, subtitleCallback, callback)) {
-                        success = true
-                    }
-                }
-
             } catch (_: Exception) {}
+
         }
 
         return success || videoLinks.isNotEmpty()
     }
 }
+
