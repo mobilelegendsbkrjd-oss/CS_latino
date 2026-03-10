@@ -22,7 +22,6 @@ class Novelas : MainAPI() {
             headers = mapOf(
                 "User-Agent" to chromeUA,
                 "Referer" to mainUrl,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Accept-Language" to "es-MX,es;q=0.9"
             ),
             timeout = 45
@@ -180,7 +179,11 @@ class Novelas : MainAPI() {
                     ) {
                         this.referer = data
                         this.quality = Qualities.Unknown.value
-                        this.isM3u8 = videoUrl.contains(".m3u8")
+                        this.type =
+                            if (videoUrl.contains(".m3u8"))
+                                ExtractorLinkType.M3U8
+                            else
+                                ExtractorLinkType.VIDEO
                     }
                 )
 
