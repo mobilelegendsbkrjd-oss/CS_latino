@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.ExtractorLink
 import com.lagradost.cloudstream3.util.Qualities
 
 class ExtractorNovelas360 : ExtractorApi() {
+
     override val name = "Novelas360 / Cyou"
     override val mainUrl = "https://novelas360.cyou"
     override val requiresReferer = true
@@ -15,27 +16,26 @@ class ExtractorNovelas360 : ExtractorApi() {
         url: String,
         referer: String?
     ): List<ExtractorLink>? {
+
         val fixedReferer = referer ?: mainUrl
 
-        // Visita iframe para cookies
         app.get(
             url,
             referer = fixedReferer,
             headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                "Accept" to "*/*",
+                "User-Agent" to "Mozilla/5.0",
                 "Origin" to mainUrl
             )
         )
 
-        val key = url.substringAfter("/e/") ?: return null
+        val key = url.substringAfter("/e/")
+
+        if (key.isBlank()) return null
 
         val headers = mapOf(
             "Origin" to mainUrl,
             "Referer" to url,
-            "X-Requested-With" to "XMLHttpRequest",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Accept" to "application/json, text/javascript, */*; q=0.01"
+            "X-Requested-With" to "XMLHttpRequest"
         )
 
         val data = mapOf(
@@ -59,17 +59,12 @@ class ExtractorNovelas360 : ExtractorApi() {
         return listOf(
             newExtractorLink(
                 source = name,
-                name = "Directo (m3u8/mp4)",
+                name = "Directo",
                 url = file
             ) {
                 this.referer = url
                 this.quality = Qualities.Unknown.value
                 this.isM3u8 = file.contains(".m3u8")
-                this.headers = mapOf(
-                    "Referer" to url,
-                    "Origin" to mainUrl,
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-                )
             }
         )
     }
