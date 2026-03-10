@@ -14,19 +14,14 @@ class ExtractorNovelas360 : ExtractorApi() {
         referer: String?
     ): List<ExtractorLink>? {
 
-        val doc = app.get(url).document
-
-        val iframe = doc.selectFirst("iframe")?.attr("src") ?: return null
-
-        if (!iframe.contains("novelas360.cyou")) return null
-
-        val key = iframe.substringAfter("/e/")
-
-        app.get(iframe)
+        val iframe = app.get(url, referer = referer).document
+        val key = iframe.selectFirst("iframe")?.attr("src")
+            ?.substringAfter("/e/")
+            ?: return null
 
         val headers = mapOf(
+            "Referer" to url,
             "Origin" to mainUrl,
-            "Referer" to iframe,
             "X-Requested-With" to "XMLHttpRequest"
         )
 
@@ -45,7 +40,6 @@ class ExtractorNovelas360 : ExtractorApi() {
         )
 
         val json = res.parsedSafe<Map<String, String>>() ?: return null
-
         val file = json["file"] ?: return null
 
         return listOf(
@@ -55,7 +49,12 @@ class ExtractorNovelas360 : ExtractorApi() {
                 url = file,
                 type = ExtractorLinkType.M3U8
             ) {
-                this.referer = iframe
+                this.referer = url
+                this.headers = mapOf(
+                    "Referer" to url,
+                    "Origin" to mainUrl,
+                    "User-Agent" to USER_AGENT
+                )
                 this.quality = Qualities.Unknown.value
             }
         )
