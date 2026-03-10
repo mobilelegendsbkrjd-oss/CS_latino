@@ -60,10 +60,14 @@ class ExtractorNovelas360 : ExtractorApi() {
             source = name,
             name = "Servidor Cyou",
             url = file,
-            referer = url,
-            quality = Qualities.Unknown.value,
-            isM3u8 = file.contains(".m3u8")
-        )
+            referer = url
+        ) {
+            this.quality = Qualities.Unknown.value
+            this.type = if (file.contains(".m3u8"))
+                ExtractorLinkType.M3U8
+            else
+                ExtractorLinkType.VIDEO
+        }
 
         return listOf(link)
     }
