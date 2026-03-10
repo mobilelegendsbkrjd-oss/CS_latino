@@ -1,6 +1,6 @@
 package com.novelas360
 
-import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 
 class ExtractorNovelas360 : ExtractorApi() {
@@ -10,45 +10,49 @@ class ExtractorNovelas360 : ExtractorApi() {
     override val requiresReferer = true
 
     override suspend fun getUrl(
-        url: String, // url del episodio ej: https://novelas360.com/video/el-amor-no-tiene-receta-capitulo-49/
+        url: String,
         referer: String?
     ): List<ExtractorLink>? {
 
         val fixedReferer = referer ?: mainUrl
 
-        // 1. Obtener el HTML del episodio
+        // 1. Obtener HTML del episodio
         val doc = app.get(url, referer = fixedReferer).document
 
-        // 2. Buscar el iframe del player (debe tener novelas360.cyou/e/)
-        val iframeElement = doc.selectFirst("div.player iframe[src*='novelas360.cyou/e/']")
-            ?: doc.selectFirst("iframe[src*='novelas360.cyou/e/']")
-            ?: doc.selectFirst(".embed-responsive iframe")
-            ?: return null
+        // 2. Buscar iframe
+        val iframeElement =
+            doc.selectFirst("div.player iframe[src*='novelas360.cyou/e/']")
+                ?: doc.selectFirst("iframe[src*='novelas360.cyou/e/']")
+                ?: doc.selectFirst(".embed-responsive iframe")
+                ?: return null
 
         val iframeUrl = iframeElement.attr("abs:src")
-        if (iframeUrl.isEmpty() || !iframeUrl.contains("/e/")) return null
+
+        if (iframeUrl.isBlank() || !iframeUrl.contains("/e/"))
+            return null
 
         val videoKey = iframeUrl.substringAfterLast("/e/")
 
-        // 3. Visita previa al iframe para intentar generar cookies uid / trace (CloudStream maneja cookies por extractor)
-        app.get(iframeUrl, referer = url, headers = mapOf(
-            "Referer" to url,
-            "Origin" to mainUrl,
-            "X-Requested-With" to "XMLHttpRequest",
-            "Accept" to "*/*"
-        ))
+        // 3. Visita iframe para cookies
+        app.get(
+            iframeUrl,
+            referer = url,
+            headers = mapOf(
+                "Referer" to url,
+                "Origin" to mainUrl,
+                "Accept" to "*/*"
+            )
+        )
 
-        // 4. Preparar POST a get_md5.php
+        // 4. Headers POST
         val postHeaders = mapOf(
             "Origin" to "https://novelas360.cyou",
             "Referer" to iframeUrl,
             "X-Requested-With" to "XMLHttpRequest",
-            "Content-Type" to "application/json",
             "Accept" to "application/json, text/javascript, */*; q=0.01",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent" to "Mozilla/5.0"
         )
 
-        // Body basado en tus curls (agregué extras comunes; ajusta si ves en logs que falta algo)
         val postBody = mapOf(
             "v" to videoKey,
             "secure" to "0",
@@ -60,7 +64,6 @@ class ExtractorNovelas360 : ExtractorApi() {
             "htoken" to "",
             "gt" to "",
             "adscore" to ""
-            // Si falla, prueba agregar: "click_hash" to "algunvalor", pero mejor capturar del browser real
         )
 
         val response = app.post(
@@ -70,25 +73,37 @@ class ExtractorNovelas360 : ExtractorApi() {
             allowRedirects = true
         )
 
-        val jsonResponse = response.parsedSafe<Map<String, Any?>>() ?: return null
+        val json = response.parsedSafe<Map<String, Any?>>() ?: return null
 
-        val fileUrl = jsonResponse["file"]?.toString() ?: return null
+        val fileUrl = json["file"]?.toString() ?: return null
 
-        if (fileUrl.isBlank() || fileUrl == "null") return null
+        if (fileUrl.isBlank())
+            return null
 
-        // 5. Devolver el link funcional
-        return listOf(
+        val links = mutableListOf<ExtractorLink>()
+
+        links.add(
             newExtractorLink(
-                this.name,
+                name,
                 "Novelas360 HLS",
-                fileUrl,
-                referer = iframeUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = fileUrl.contains(".m3u8") || fileUrl.contains("master") || fileUrl.contains("playlist")
-            ).apply {
-                this.headers["Referer"] = iframeUrl
-                this.headers["Origin"] = "https://novelas360.cyou"
+                fileUrl
+            ) {
+                this.referer = iframeUrl
+                this.quality = Qualities.Unknown.value
+                this.type =
+                    if (fileUrl.contains(".m3u8"))
+                        ExtractorLinkType.M3U8
+                    else
+                        ExtractorLinkType.VIDEO
+
+                this.headers = mapOf(
+                    "Referer" to iframeUrl,
+                    "Origin" to "https://novelas360.cyou",
+                    "User-Agent" to "Mozilla/5.0"
+                )
             }
         )
+
+        return links
     }
 }
