@@ -2,10 +2,11 @@ package com.novelas360
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.Jsoup
 
 class ExtractorNovelas360 : ExtractorApi() {
 
-    override val name = "Novelas360 / Cyou"
+    override val name = "Novelas360"
     override val mainUrl = "https://novelas360.cyou"
     override val requiresReferer = true
 
@@ -14,59 +15,43 @@ class ExtractorNovelas360 : ExtractorApi() {
         referer: String?
     ): List<ExtractorLink>? {
 
-        val fixedReferer = referer ?: mainUrl
-
-        app.get(
+        val doc = app.get(
             url,
-            referer = fixedReferer,
+            referer = referer,
             headers = mapOf(
-                "User-Agent" to "Mozilla/5.0",
-                "Origin" to mainUrl
+                "User-Agent" to "Mozilla/5.0"
             )
-        )
+        ).document
 
-        val key = when {
-            url.contains("/e/") -> url.substringAfter("/e/")
-            url.contains("/v/") -> url.substringAfter("/v/")
-            url.contains("/embed/") -> url.substringAfter("/embed/")
-            else -> return null
-        }
+        val html = doc.html()
 
-        val headers = mapOf(
-            "Origin" to mainUrl,
-            "Referer" to url,
-            "X-Requested-With" to "XMLHttpRequest",
-            "User-Agent" to "Mozilla/5.0"
-        )
+        val ws = Regex("""var ws\s*=\s*['"](.*?)['"]""")
+            .find(html)?.groupValues?.get(1)
+            ?: return null
 
-        val data = mapOf(
-            "v" to key,
-            "secure" to "0",
-            "ver" to "4",
-            "adb" to "0",
-            "wasmcheck" to "0"
-        )
+        val id = url.substringAfter("/e/")
 
-        val res = app.post(
-            "$mainUrl/player/get_md5.php",
-            data = data,
-            headers = headers
-        )
+        val videoUrl = "$mainUrl/f/$id$ws"
 
-        val json = res.parsedSafe<Map<String, String>>() ?: return null
-        val file = json["file"] ?: return null
+        val res = app.get(
+            videoUrl,
+            referer = url,
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0"
+            )
+        ).text
+
+        val m3u8 = Regex("""https?://[^\s"]+\.m3u8[^\s"]*""")
+            .find(res)?.value ?: return null
 
         val link = newExtractorLink(
-            "Novelas360",
-            "Servidor Cyou",
-            file
+            name,
+            name,
+            m3u8
         ) {
-            this.referer = url
+            this.referer = mainUrl
             this.quality = Qualities.Unknown.value
-            this.type = if (file.contains(".m3u8"))
-                ExtractorLinkType.M3U8
-            else
-                ExtractorLinkType.VIDEO
+            this.type = ExtractorLinkType.M3U8
         }
 
         return listOf(link)
