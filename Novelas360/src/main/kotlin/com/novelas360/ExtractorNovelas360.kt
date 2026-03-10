@@ -110,7 +110,7 @@ object UniversalExtractor {
                     this.headers = mapOf(
                         "Referer" to referer,
                         "Origin" to url.substringBefore("/e/"),
-                        "User-Agent" to USER_AGENT
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                     )
                 }
             )
