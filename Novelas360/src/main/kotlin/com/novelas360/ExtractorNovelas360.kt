@@ -1,8 +1,10 @@
 package com.novelas360
 
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 
 class ExtractorNovelas360 : ExtractorApi() {
 
@@ -15,44 +17,52 @@ class ExtractorNovelas360 : ExtractorApi() {
         referer: String?
     ): List<ExtractorLink>? {
 
-        val doc = app.get(
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0",
+            "Referer" to (referer ?: mainUrl)
+        )
+
+        // abrir embed
+        val res = app.get(
             url,
-            referer = referer,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0"
-            )
-        ).document
+            headers = headers
+        )
 
-        val html = doc.html()
+        val html = res.text
 
-        val ws = Regex("""var ws\s*=\s*['"](.*?)['"]""")
-            .find(html)?.groupValues?.get(1)
+        // extraer ws token
+        val ws = Regex("""var\s+ws\s*=\s*['"]([^'"]+)""")
+            .find(html)
+            ?.groupValues
+            ?.get(1)
             ?: return null
 
+        // extraer ID del video
         val id = url.substringAfter("/e/")
 
-        val videoUrl = "$mainUrl/f/$id$ws"
+        // construir endpoint real
+        val videoPage = "$mainUrl/f/$id$ws"
 
-        val res = app.get(
-            videoUrl,
-            referer = url,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0"
-            )
+        val videoRes = app.get(
+            videoPage,
+            headers = headers,
+            referer = url
         ).text
 
-        val m3u8 = Regex("""https?://[^\s"]+\.m3u8[^\s"]*""")
-            .find(res)?.value ?: return null
+        // buscar playlist
+        val m3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+            .find(videoRes)
+            ?.value
+            ?: return null
 
-        val link = newExtractorLink(
+        val link = ExtractorLink(
             name,
             name,
-            m3u8
-        ) {
-            this.referer = mainUrl
-            this.quality = Qualities.Unknown.value
-            this.type = ExtractorLinkType.M3U8
-        }
+            m3u8,
+            mainUrl,
+            Qualities.Unknown.value,
+            ExtractorLinkType.M3U8
+        )
 
         return listOf(link)
     }
