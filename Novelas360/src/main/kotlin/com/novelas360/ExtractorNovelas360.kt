@@ -1,10 +1,10 @@
 package com.novelas360
 
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.ExtractorApi
-import com.lagradost.cloudstream3.ExtractorLink
-import com.lagradost.cloudstream3.util.Qualities
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 
 class ExtractorNovelas360 : ExtractorApi() {
 
@@ -42,8 +42,7 @@ class ExtractorNovelas360 : ExtractorApi() {
             "Origin" to mainUrl,
             "Referer" to url,
             "X-Requested-With" to "XMLHttpRequest",
-            "User-Agent" to "Mozilla/5.0",
-            "Accept" to "application/json, text/javascript, */*; q=0.01"
+            "User-Agent" to "Mozilla/5.0"
         )
 
         val data = mapOf(
@@ -70,14 +69,9 @@ class ExtractorNovelas360 : ExtractorApi() {
                 name = "Servidor Cyou",
                 url = file
             ) {
-                this.referer = url
-                this.quality = Qualities.Unknown.value
-                this.isM3u8 = file.contains(".m3u8")
-                this.headers = mapOf(
-                    "Referer" to url,
-                    "Origin" to mainUrl,
-                    "User-Agent" to "Mozilla/5.0"
-                )
+                referer = url
+                quality = Qualities.Unknown.value
+                isM3u8 = file.contains(".m3u8")
             }
         )
     }
