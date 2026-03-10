@@ -2,9 +2,6 @@ package com.novelas360
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.ExtractorApi
-import com.lagradost.cloudstream3.ExtractorLink
-import com.lagradost.cloudstream3.util.Qualities
 
 class ExtractorNovelas360 : ExtractorApi() {
 
@@ -29,7 +26,6 @@ class ExtractorNovelas360 : ExtractorApi() {
         )
 
         val key = url.substringAfter("/e/")
-
         if (key.isBlank()) return null
 
         val headers = mapOf(
@@ -64,7 +60,11 @@ class ExtractorNovelas360 : ExtractorApi() {
             ) {
                 this.referer = url
                 this.quality = Qualities.Unknown.value
-                this.isM3u8 = file.contains(".m3u8")
+                this.type =
+                    if (file.contains(".m3u8"))
+                        ExtractorLinkType.M3U8
+                    else
+                        ExtractorLinkType.VIDEO
             }
         )
     }
