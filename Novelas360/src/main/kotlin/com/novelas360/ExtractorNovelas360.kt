@@ -1,10 +1,8 @@
 package com.novelas360
 
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.util.Qualities
 
 class ExtractorNovelas360 : ExtractorApi() {
 
@@ -19,7 +17,6 @@ class ExtractorNovelas360 : ExtractorApi() {
 
         val fixedReferer = referer ?: mainUrl
 
-        // visitar iframe para cookies
         app.get(
             url,
             referer = fixedReferer,
@@ -35,8 +32,6 @@ class ExtractorNovelas360 : ExtractorApi() {
             url.contains("/embed/") -> url.substringAfter("/embed/")
             else -> return null
         }
-
-        if (key.isBlank()) return null
 
         val headers = mapOf(
             "Origin" to mainUrl,
@@ -56,23 +51,26 @@ class ExtractorNovelas360 : ExtractorApi() {
         val res = app.post(
             "$mainUrl/player/get_md5.php",
             data = data,
-            headers = headers,
-            timeout = 30
+            headers = headers
         )
 
         val json = res.parsedSafe<Map<String, String>>() ?: return null
         val file = json["file"] ?: return null
 
-        return listOf(
-            newExtractorLink(
-                source = name,
-                name = "Servidor Cyou",
-                url = file
-            ) {
-                referer = url
-                quality = Qualities.Unknown.value
-                isM3u8 = file.contains(".m3u8")
-            }
-        )
+        val link = newExtractorLink(
+            name,
+            "Servidor Cyou",
+            file
+        ) {
+            this.referer = url
+            this.quality = Qualities.Unknown.value
+            this.type =
+                if (file.contains(".m3u8"))
+                    ExtractorLinkType.M3U8
+                else
+                    ExtractorLinkType.VIDEO
+        }
+
+        return listOf(link)
     }
 }
