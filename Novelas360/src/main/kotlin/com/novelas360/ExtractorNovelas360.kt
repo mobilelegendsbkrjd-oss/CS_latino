@@ -22,7 +22,6 @@ class ExtractorNovelas360 : ExtractorApi() {
 
         val key = iframe.substringAfter("/e/")
 
-        // abrir iframe para cookies
         app.get(iframe)
 
         val headers = mapOf(
