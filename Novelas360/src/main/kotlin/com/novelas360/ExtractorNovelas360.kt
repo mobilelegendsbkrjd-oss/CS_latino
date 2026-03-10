@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class ExtractorNovelas360 : ExtractorApi() {
 
@@ -23,12 +24,12 @@ class ExtractorNovelas360 : ExtractorApi() {
         )
 
         // abrir embed
-        val res = app.get(
+        val doc = app.get(
             url,
             headers = headers
-        )
+        ).document
 
-        val html = res.text
+        val html = doc.html()
 
         // extraer ws token
         val ws = Regex("""var\s+ws\s*=\s*['"]([^'"]+)""")
@@ -37,10 +38,10 @@ class ExtractorNovelas360 : ExtractorApi() {
             ?.get(1)
             ?: return null
 
-        // extraer ID del video
+        // extraer id base64
         val id = url.substringAfter("/e/")
 
-        // construir endpoint real
+        // endpoint del player
         val videoPage = "$mainUrl/f/$id$ws"
 
         val videoRes = app.get(
@@ -55,15 +56,16 @@ class ExtractorNovelas360 : ExtractorApi() {
             ?.value
             ?: return null
 
-        val link = ExtractorLink(
-            name,
-            name,
-            m3u8,
-            mainUrl,
-            Qualities.Unknown.value,
-            ExtractorLinkType.M3U8
+        return listOf(
+            newExtractorLink(
+                name,
+                name,
+                m3u8
+            ) {
+                this.referer = mainUrl
+                this.quality = Qualities.Unknown.value
+                this.type = ExtractorLinkType.M3U8
+            }
         )
-
-        return listOf(link)
     }
 }
