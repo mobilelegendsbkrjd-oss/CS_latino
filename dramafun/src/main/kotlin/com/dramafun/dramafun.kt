@@ -27,58 +27,37 @@ class DramaFun : MainAPI() {
 
         val home = mutableListOf<HomePageList>()
 
-        val nuevos = getCategory("$mainUrl/newvideos.php")
         val top = getCategory("$mainUrl/topvideos.php")
         val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
         val doramas = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
+        val nuevos = getCategory("$mainUrl/newvideos.php")
 
-        if (nuevos.isNotEmpty()) home.add(HomePageList("Nuevos Episodios", nuevos))
-        if (top.isNotEmpty()) home.add(HomePageList("Top Videos", top))
-        if (peliculas.isNotEmpty()) home.add(HomePageList("Películas Latino", peliculas))
-        if (doramas.isNotEmpty()) home.add(HomePageList("Doramas Sub Español", doramas))
+        home.add(HomePageList("Nuevos Episodios", nuevos))
+        home.add(HomePageList("Top Videos", top))
+        home.add(HomePageList("Películas Latino", peliculas))
+        home.add(HomePageList("Doramas Sub Español", doramas))
 
         return newHomePageResponse(home)
     }
 
-    // ================= CATEGORY / LISTAS =================
+    // ================= CATEGORY =================
 
     private suspend fun getCategory(url: String): List<SearchResponse> {
 
         val doc = app.get(url).document
 
-        // Intentamos primero el selector moderno con posters (#pm-grid)
-        var items = doc.select("ul#pm-grid li").mapNotNull { li ->
-            li.toSearchResult()
-        }
-
-        // Si no hay nada en pm-grid, fallback a todos los enlaces watch.php (como antes)
-        if (items.isEmpty()) {
-            items = doc.select("a[href*=watch.php?vid=]").mapNotNull { a ->
-                a.toSearchResult()
-            }
-        }
-
-        // Solo distinct si hay duplicados reales (por url)
-        return items.distinctBy { it.url }
+        return doc.select("ul.pm-ul-browse-videos li")
+            .mapNotNull { it.toSearchResult() }
     }
 
     // ================= SEARCH =================
 
     override suspend fun search(query: String): List<SearchResponse> {
 
-        if (query.isBlank()) return emptyList()
-
         val doc = app.get("$mainUrl/search.php?keywords=$query").document
 
-        var items = doc.select("ul#pm-grid li").mapNotNull { li ->
-            li.toSearchResult()
-        }
-
-        if (items.isEmpty()) {
-            items = doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
-        }
-
-        return items.distinctBy { it.url }
+        return doc.select("ul.pm-ul-browse-videos li")
+            .mapNotNull { it.toSearchResult() }
     }
 
     // ================= LOAD =================
@@ -87,72 +66,40 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(url).document
 
-        // Título crudo (del episodio)
-        val titleRaw = doc.selectFirst("h1")?.text()
-            ?: doc.selectFirst("h2")?.text()
-            ?: doc.selectFirst(".pm-series-brief h1")?.text()
-            ?: "Drama"
+        val title =
+            doc.selectFirst("h1")?.text()
+                ?: doc.selectFirst("h2")?.text()
+                ?: "Drama"
 
-        // Limpieza para nombre base de serie (sin capítulo ni basura)
-        val cleanTitle = titleRaw
-            .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\)|Temporada \\d+).*"), "")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-            .removeSurrounding("[", "]")
+        val cleanTitle = title.replace(Regex("(?i)Capítulo.*|\\(en Español\\)|online sub español HD|en Español"), "").trim()
 
-        // Poster: preferir el de la serie si existe
-        val poster = doc.selectFirst(".pm-series-brief img")?.attr("abs:src")
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst(".pm-video-thumb img")?.attr("abs:src")
+        val poster =
+            doc.selectFirst(".pm-video-thumb img")
+                ?.attr("src")
 
-        val plot = doc.selectFirst(".pm-series-description p, .pm-video-description p")?.text()?.trim()
+        val episodes = doc.select("ul.s a")
 
-        // Episodios: más selectores para asegurar que encuentre la lista
-        val episodeSelectors = listOf(
-            "ul.s a[href*=watch.php?vid=]",
-            "select.episodeoption option[value*=watch.php?vid=]",
-            "div.tabcontent ul a[href*=watch.php?vid=]",
-            ".SeasonsEpisodesMain a[href*=watch.php?vid=]"
-        )
+        if (episodes.isNotEmpty()) {
 
-        var episodeElements: List<Element> = emptyList()
-        for (selector in episodeSelectors) {
-            episodeElements = doc.select(selector)
-            if (episodeElements.isNotEmpty()) break
-        }
+            val epList = episodes.map {
 
-        if (episodeElements.isNotEmpty()) {
-
-            val epList = episodeElements.mapIndexed { index, el ->
-
-                val epUrlRaw = el.attr("href") ?: el.attr("value") ?: ""
-                val epUrl = if (epUrlRaw.startsWith("http")) epUrlRaw else "$mainUrl/$epUrlRaw"
-
-                val epText = el.text().trim() ?: el.attr("title") ?: ""
-                val epNum = Regex("(?i)capitulo\\s*(\\d+)").find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: (index + 1)
+                val epUrl = "\( mainUrl/ \){it.attr("href")}"
 
                 newEpisode(epUrl) {
-                    name = "Capítulo $epNum"
-                    episode = epNum
-                    season = 1
+                    name = "Episodio ${it.text()}"
                 }
-            }.sortedBy { it.episode }
+            }
 
-            if (epList.isNotEmpty()) {
-                return newTvSeriesLoadResponse(
-                    cleanTitle,           // nombre limpio de la serie
-                    url,
-                    TvType.TvSeries,
-                    epList
-                ) {
-                    posterUrl = poster
-                    this.plot = plot
-                }
+            return newTvSeriesLoadResponse(
+                cleanTitle,
+                url,
+                TvType.TvSeries,
+                epList
+            ) {
+                posterUrl = poster
             }
         }
 
-        // Fallback: movie o episodio suelto
         return newMovieLoadResponse(
             cleanTitle,
             url,
@@ -160,7 +107,6 @@ class DramaFun : MainAPI() {
             url
         ) {
             posterUrl = poster
-            this.plot = plot
         }
     }
 
@@ -175,28 +121,32 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(data).document
 
-        val enfun = doc.selectFirst("a.xtgo[href*=enfun.php?post=]")?.attr("href")
-            ?: doc.select("a[href*=enfun.php?post=]").firstOrNull()?.attr("href")
+        val enfun = doc.selectFirst("a.xtgo")?.attr("href")
             ?: return false
 
         val post = enfun.substringAfter("post=")
 
-        try {
-            val decoded = String(Base64.decode(post, Base64.DEFAULT))
-            val json = JSONObject(decoded)
+        val decoded =
+            String(Base64.decode(post, Base64.DEFAULT))
 
-            if (json.has("servers")) {
-                val servers = json.getJSONObject("servers")
-                val keys = servers.keys()
+        val json = JSONObject(decoded)
 
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    val server = servers.getString(key)
-                    loadExtractor(server, data, subtitleCallback, callback)
-                }
-            }
-        } catch (e: Exception) {
-            loadExtractor(enfun, data, subtitleCallback, callback)
+        val servers = json.getJSONObject("servers")
+
+        val keys = servers.keys()
+
+        while (keys.hasNext()) {
+
+            val key = keys.next()
+
+            val server = servers.getString(key)
+
+            loadExtractor(
+                server,
+                data,
+                subtitleCallback,
+                callback
+            )
         }
 
         return true
@@ -206,29 +156,35 @@ class DramaFun : MainAPI() {
 
     private fun Element.toSearchResult(): SearchResponse? {
 
-        val linkRaw = selectFirst("a")?.attr("href") ?: attr("href") ?: return null
-        val link = if (linkRaw.startsWith("http")) linkRaw else "$mainUrl/$linkRaw"
+        val link =
+            selectFirst("a")?.attr("href") ?: return null
 
-        val titleRaw = selectFirst(".caption h3 a")?.text()
-            ?: selectFirst("h3")?.text()
-            ?: ownText().trim().ifEmpty { attr("title") }
-            ?: return null
+        val title =
+            selectFirst("h3")?.text() ?: return null
 
-        val cleanTitle = titleRaw
-            .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\))"), "")
-            .replace(Regex("\\s+"), " ")
+        // Limpieza de título (sin capítulo ni basura)
+        val cleanTitle = title
+            .replace(Regex("(?i)\\[|\\]|\\(en\\s*Español\\)|Sub\\s*Español|HD|online|completo|Capítulo \\d+|Episodio \\d+"), "")
             .trim()
-            .removeSurrounding("[", "]")
 
         if (cleanTitle.isBlank()) return null
 
+        // Poster: priorizamos data-echo (lazy load), fallback a src
         val posterRaw = selectFirst("img[data-echo]")?.attr("data-echo")
             ?: selectFirst("img")?.attr("src")
-        val poster = if (posterRaw?.startsWith("http") == true) posterRaw else posterRaw?.let { "$mainUrl/$it" }
+
+        val poster = if (posterRaw?.startsWith("http") == true) posterRaw
+        else posterRaw?.let { "$mainUrl/$it" }
+
+        val fixedLink =
+            if (link.startsWith("http"))
+                link
+            else
+                "$mainUrl/$link"
 
         return newTvSeriesSearchResponse(
             cleanTitle,
-            link
+            fixedLink
         ) {
             this.posterUrl = poster
         }
