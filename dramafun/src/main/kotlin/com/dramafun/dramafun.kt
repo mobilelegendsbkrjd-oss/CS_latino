@@ -1,9 +1,10 @@
 package com.dramafun
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import android.util.Base64
 import org.json.JSONObject
 
 class DramaFun : MainAPI() {
@@ -13,13 +14,10 @@ class DramaFun : MainAPI() {
     override val hasMainPage = true
     override var lang = "es"
 
-    override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie
-    )
+    // Mejor tratar todo como Movie porque no hay series reales
+    override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ================= HOME =================
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -27,87 +25,75 @@ class DramaFun : MainAPI() {
 
         val home = mutableListOf<HomePageList>()
 
-        val top = getCategory("$mainUrl/topvideos.php")
-        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
-        val doramas = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
-
-        home.add(HomePageList("Top Videos", top))
-        home.add(HomePageList("Películas Latino", peliculas))
-        home.add(HomePageList("Doramas Sub Español", doramas))
+        listOf(
+            "Últimos" to "$mainUrl/newvideos.php",
+            "Top" to "$mainUrl/topvideos.php",
+            "Doramas Sub" to "$mainUrl/category.php?cat=Doramas-Sub-Espanol",
+            "Novelas Turcas Sub" to "$mainUrl/category.php?cat=Novelas-Turcas-Subtituladas",
+            "Películas Latino" to "$mainUrl/category.php?cat=peliculas-audio-espanol-latino"
+        ).forEach { (name, url) ->
+            val list = getVideoList(url)
+            if (list.isNotEmpty()) home.add(HomePageList(name, list))
+        }
 
         return newHomePageResponse(home)
     }
 
-    // ================= CATEGORY =================
+    // ================= PARSER GENÉRICO PARA LISTAS =================
+    private suspend fun getVideoList(url: String): List<SearchResponse> {
+        val doc = app.get(url, timeout = 30).document
+        return parseVideoList(doc)
+    }
 
-    private suspend fun getCategory(url: String): List<SearchResponse> {
+    private fun parseVideoList(doc: Document): List<SearchResponse> {
+        // El sitio usa texto plano con <a href="watch.php?vid=...">[Título]</a>
+        // Buscamos todos los <a> que contengan watch.php?vid=
+        return doc.select("a[href*=watch.php?vid=]").mapNotNull { a ->
+            val href = a.attr("href").let { if (it.startsWith("http")) it else "$mainUrl/$it" }
+            val titleRaw = a.ownText().trim().removeSurrounding("[", "]").trim()
+            val cleanTitle = titleRaw.replace(Regex("(?i)\\(en\\s*Español\\)|Sub\\s*Español|Completo|HD"), "").trim()
 
-        val doc = app.get(url).document
-
-        return doc.select("ul.pm-ul-browse-videos li")
-            .mapNotNull { it.toSearchResult() }
+            newMovieSearchResponse(
+                name = cleanTitle,
+                url = href,
+                apiName = name,
+                type = TvType.Movie   // o TvType.Others
+            ) {
+                posterUrl = null      // no hay posters confiables
+            }
+        }.distinctBy { it.url }
     }
 
     // ================= SEARCH =================
-
     override suspend fun search(query: String): List<SearchResponse> {
-
+        if (query.isBlank()) return emptyList()
         val doc = app.get("$mainUrl/search.php?keywords=$query").document
-
-        return doc.select("ul.pm-ul-browse-videos li")
-            .mapNotNull { it.toSearchResult() }
+        return parseVideoList(doc)
     }
 
-    // ================= LOAD =================
-
-    override suspend fun load(url: String): LoadResponse {
-
+    // ================= LOAD (solo movie / episodio suelto) =================
+    override suspend fun load(url: String): LoadResponse? {
         val doc = app.get(url).document
 
-        val title =
-            doc.selectFirst("h1")?.text()
-                ?: doc.selectFirst("h2")?.text()
-                ?: "Drama"
+        val titleRaw = doc.selectFirst("h1, h2, .page-title, title")?.text()?.trim() ?: "Sin título"
+        val cleanTitle = titleRaw.replace(Regex("(?i)Capítulo.*|\\(en\\s*Español\\)|en\\s*Español"), "").trim()
 
-        val poster =
-            doc.selectFirst(".pm-video-thumb img")
-                ?.attr("src")
-
-        val episodes = doc.select("ul.s a")
-
-        if (episodes.isNotEmpty()) {
-
-            val epList = episodes.map {
-
-                val epUrl = "$mainUrl/${it.attr("href")}"
-
-                newEpisode(epUrl) {
-                    name = "Episodio ${it.text()}"
-                }
-            }
-
-            return newTvSeriesLoadResponse(
-                title,
-                url,
-                TvType.TvSeries,
-                epList
-            ) {
-                posterUrl = poster
-            }
-        }
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst(".pm-video-thumb img, img[src*=poster]")?.attr("abs:src")
 
         return newMovieLoadResponse(
-            title,
-            url,
-            TvType.Movie,
-            url
+            name = cleanTitle,
+            url = url,
+            apiName = name,
+            type = TvType.Movie,
+            data = url
         ) {
             posterUrl = poster
+            plot = doc.selectFirst(".description, .sinopsis, p")?.text()?.trim()
         }
     }
 
     // ================= LOAD LINKS =================
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -117,61 +103,58 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(data).document
 
-        val enfun = doc.selectFirst("a.xtgo")?.attr("href")
-            ?: return false
+        // Intento 1: Buscar enlaces directos a enfun.php (clase puede haber cambiado)
+        var enfunLinks = doc.select("a[href*=enfun.php?post=]").map { it.attr("abs:href") }
 
-        val post = enfun.substringAfter("post=")
-
-        val decoded =
-            String(Base64.decode(post, Base64.DEFAULT))
-
-        val json = JSONObject(decoded)
-
-        val servers = json.getJSONObject("servers")
-
-        val keys = servers.keys()
-
-        while (keys.hasNext()) {
-
-            val key = keys.next()
-
-            val server = servers.getString(key)
-
-            loadExtractor(
-                server,
-                data,
-                subtitleCallback,
-                callback
-            )
+        // Intento 2: Si no hay, busca cualquier a[href] que parezca player o base64
+        if (enfunLinks.isEmpty()) {
+            enfunLinks = doc.select("a[href*=post=]").map { it.attr("abs:href") }
         }
+
+        enfunLinks.forEach { enfunUrl ->
+            val enfunDoc = app.get(enfunUrl, referer = data).document
+
+            // Busca JSON o base64 en scripts
+            enfunDoc.select("script").forEach { script ->
+                val text = script.data() ?: script.html()
+                if ("servers" in text || "post=" in text) {
+                    // Intenta extraer base64 o JSON directamente
+                    val possibleB64 = Regex("post=([A-Za-z0-9+/=]+)").find(enfunUrl)?.groupValues?.get(1)
+                    if (possibleB64 != null) {
+                        try {
+                            val decoded = String(Base64.decode(possibleB64, Base64.DEFAULT))
+                            val json = JSONObject(decoded)
+                            if (json.has("servers")) {
+                                val servers = json.getJSONObject("servers")
+                                servers.keys().forEach { key ->
+                                    val serverUrl = servers.getString(key)
+                                    loadExtractor(serverUrl, data, subtitleCallback, callback)
+                                }
+                            }
+                        } catch (_: Throwable) { }
+                    }
+                }
+            }
+
+            // Fallback: cualquier iframe o video src
+            enfunDoc.select("iframe[src], video source[src]").forEach { el ->
+                val src = el.attr("abs:src") ?: return@forEach
+                callback(
+                    ExtractorLink(
+                        this.name,
+                        "Embed ${el.attr("src")}",
+                        src,
+                        referer = enfunUrl,
+                        quality = Qualities.Unknown.value,
+                        type = ExtractorLinkType.VIDEO
+                    )
+                )
+            }
+        }
+
+        // Si nada → prueba extractors directos en la página watch
+        loadExtractor(data, data, subtitleCallback, callback)
 
         return true
-    }
-
-    // ================= PARSER =================
-
-    private fun Element.toSearchResult(): SearchResponse? {
-
-        val link =
-            selectFirst("a")?.attr("href") ?: return null
-
-        val title =
-            selectFirst("h3")?.text() ?: return null
-
-        val poster =
-            selectFirst("img")?.attr("src")
-
-        val fixedLink =
-            if (link.startsWith("http"))
-                link
-            else
-                "$mainUrl/$link"
-
-        return newTvSeriesSearchResponse(
-            title,
-            fixedLink
-        ) {
-            this.posterUrl = poster
-        }
     }
 }
