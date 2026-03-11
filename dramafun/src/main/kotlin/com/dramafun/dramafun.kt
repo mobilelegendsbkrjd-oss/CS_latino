@@ -1,10 +1,9 @@
 package com.dramafun
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import android.util.Base64
 import org.json.JSONObject
 
 class DramaFun : MainAPI() {
@@ -18,10 +17,6 @@ class DramaFun : MainAPI() {
         TvType.TvSeries
     )
 
-    private val headers = mapOf(
-        "User-Agent" to USER_AGENT
-    )
-
     // ================= HOME =================
 
     override suspend fun getMainPage(
@@ -29,68 +24,65 @@ class DramaFun : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val items = mutableListOf<HomePageList>()
+        val list = getCategory("$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas&page=$page")
 
-        val novelas = getCategory(
-            "$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas&page=$page"
+        return newHomePageResponse(
+            listOf(HomePageList("Novelas y Telenovelas", list)),
+            false
         )
-
-        items.add(HomePageList("Novelas y Telenovelas", novelas))
-
-        return newHomePageResponse(items, false)
     }
 
     // ================= CATEGORY =================
 
     private suspend fun getCategory(url: String): List<SearchResponse> {
 
-        val doc = app.get(url, headers = headers).document
+        val doc = app.get(url).document
 
-        return doc.select("ul#pm-grid li").mapNotNull { it.toSearchResult() }
+        return doc.select("ul.pm-ul-browse-videos li")
+            .mapNotNull { it.toSearchResult() }
     }
 
     // ================= SEARCH =================
 
     override suspend fun search(query: String): List<SearchResponse> {
 
-        val doc = app.get(
-            "$mainUrl/search.php?keywords=$query",
-            headers = headers
-        ).document
+        val doc = app.get("$mainUrl/search.php?keywords=$query").document
 
-        return doc.select("ul#pm-grid li").mapNotNull { it.toSearchResult() }
+        return doc.select("ul.pm-ul-browse-videos li")
+            .mapNotNull { it.toSearchResult() }
     }
 
-    // ================= LOAD SERIES =================
+    // ================= LOAD =================
 
     override suspend fun load(url: String): LoadResponse {
 
-        val fixedUrl = if (url.contains("watch.php")) {
+        var fixedUrl = url
 
-            val doc = app.get(url, headers = headers).document
+        // Si entramos a watch.php → buscar la serie
+        if (url.contains("watch.php")) {
+
+            val doc = app.get(url).document
 
             doc.selectFirst("a[href*=view-serie]")
                 ?.attr("href")
-                ?.let { mainUrl + "/" + it }
-                ?: url
+                ?.let {
+                    fixedUrl = "$mainUrl/$it"
+                }
+        }
 
-        } else url
+        val doc = app.get(fixedUrl).document
 
-        val doc = app.get(fixedUrl, headers = headers).document
-
-        val title = doc.selectFirst("h1")?.text()?.trim() ?: "Drama"
+        val title = doc.selectFirst("h1")?.text() ?: "Drama"
 
         val poster = doc.selectFirst(".pm-video-thumb img")
             ?.attr("src")
 
         val episodes = doc.select("ul.s a").map {
 
-            val epUrl = mainUrl + "/" + it.attr("href")
-
-            val epNum = it.text()
+            val epUrl = "$mainUrl/${it.attr("href")}"
 
             newEpisode(epUrl) {
-                name = "Episodio $epNum"
+                name = "Episodio ${it.text()}"
             }
         }
 
@@ -113,7 +105,7 @@ class DramaFun : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val doc = app.get(data, headers = headers).document
+        val doc = app.get(data).document
 
         val enfun = doc.selectFirst("a.xtgo")?.attr("href")
             ?: return false
@@ -155,9 +147,14 @@ class DramaFun : MainAPI() {
 
         val title = selectFirst("h3")?.text() ?: return null
 
-        val poster = selectFirst("img")?.attr("src")
+        val poster = selectFirst("img.pm-thumb")
+            ?.attr("src")
 
-        val fixedLink = if (link.startsWith("http")) link else "$mainUrl/$link"
+        val fixedLink =
+            if (link.startsWith("http"))
+                link
+            else
+                "$mainUrl/$link"
 
         return newTvSeriesSearchResponse(
             title,
