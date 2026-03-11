@@ -27,10 +27,10 @@ class DramaFun : MainAPI() {
 
         val home = mutableListOf<HomePageList>()
 
-        val top = getCategory("$mainUrl/topvideos.php")
-        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
-        val doramas = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
-        val nuevos = getCategory("$mainUrl/newvideos.php")  // agregué nuevos para que veas lo último
+        val nuevos = getCategory("$mainUrl/newvideos.php").distinctBy { it.url }
+        val top = getCategory("$mainUrl/topvideos.php").distinctBy { it.url }
+        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino").distinctBy { it.url }
+        val doramas = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol").distinctBy { it.url }
 
         home.add(HomePageList("Nuevos Episodios", nuevos))
         home.add(HomePageList("Top Videos", top))
@@ -46,17 +46,36 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(url).document
 
-        // El sitio ya no usa ul.pm-ul-browse-videos → usamos los <a> con watch.php?vid=
-        return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
+        // Selector principal para categorías con posters (ul#pm-grid li)
+        val pmGridItems = doc.select("ul#pm-grid li").mapNotNull { li ->
+            li.toSearchResult()
+        }
+
+        // Si no hay pm-grid, fallback a enlaces directos
+        if (pmGridItems.isEmpty()) {
+            return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        }
+
+        return pmGridItems.distinctBy { it.url }
     }
 
     // ================= SEARCH =================
 
     override suspend fun search(query: String): List<SearchResponse> {
 
+        if (query.isBlank()) return emptyList()
+
         val doc = app.get("$mainUrl/search.php?keywords=$query").document
 
-        return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
+        val pmGridItems = doc.select("ul#pm-grid li").mapNotNull { li ->
+            li.toSearchResult()
+        }
+
+        if (pmGridItems.isEmpty()) {
+            return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        }
+
+        return pmGridItems.distinctBy { it.url }
     }
 
     // ================= LOAD =================
@@ -65,23 +84,31 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(url).document
 
-        val title =
+        // Título crudo
+        val titleRaw =
             doc.selectFirst("h1")?.text()
                 ?: doc.selectFirst("h2")?.text()
+                ?: doc.selectFirst(".pm-series-brief h1")?.text()
                 ?: "Drama"
 
-        val cleanTitle = title.replace(Regex("(?i)Capitulo.*|online sub español HD|en Español"), "").trim()
+        // Limpieza fuerte para nombre de serie/película (sin capítulo ni basura)
+        val cleanTitle = titleRaw
+            .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\)|Temporada \\d+).*"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .removeSurrounding("[", "]")
 
+        // Poster preferido de serie o og:image
         val poster =
-            doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: doc.selectFirst(".pm-video-thumb img, .pm-series-brief img")?.attr("abs:src")
+            doc.selectFirst(".pm-series-brief img")?.attr("abs:src")
+                ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: doc.selectFirst(".pm-video-thumb img")?.attr("abs:src")
 
-        val plot = doc.selectFirst(".pm-series-description p, .pm-video-description p")?.text()?.trim()
+        val plot = doc.selectFirst(".pm-series-description p, .pm-video-description p, meta[name=description]")?.text()?.trim()
 
-        // Episodios: desktop (ul.s) o mobile (select.episodeoption)
+        // Episodios: desktop (ul.s) o mobile (select)
         val episodesDesktop = doc.select("ul.s a[href*=watch.php?vid=]")
         val episodesMobile = doc.select("select.episodeoption option[value*=watch.php?vid=]")
-
         val episodeElements = if (episodesDesktop.isNotEmpty()) episodesDesktop else episodesMobile
 
         if (episodeElements.isNotEmpty()) {
@@ -98,12 +125,12 @@ class DramaFun : MainAPI() {
                 newEpisode(epUrl) {
                     name = "Capítulo $epNum"
                     episode = epNum
-                    season = 1  // solo 1 por ahora
+                    season = 1
                 }
             }
 
             return newTvSeriesLoadResponse(
-                cleanTitle,
+                cleanTitle,  // ← nombre limpio de la serie
                 url,
                 TvType.TvSeries,
                 epList
@@ -113,9 +140,9 @@ class DramaFun : MainAPI() {
             }
         }
 
-        // Si no hay episodios → movie o episodio suelto
+        // Fallback movie/episodio suelto
         return newMovieLoadResponse(
-            cleanTitle,
+            cleanTitle,  // ← limpio
             url,
             TvType.Movie,
             url
@@ -136,7 +163,6 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(data).document
 
-        // Buscamos los enlaces xtgo o cualquier a con enfun.php?post=
         val enfun = doc.selectFirst("a.xtgo[href*=enfun.php?post=]")?.attr("href")
             ?: doc.select("a[href*=enfun.php?post=]").firstOrNull()?.attr("href")
             ?: return false
@@ -158,7 +184,6 @@ class DramaFun : MainAPI() {
                 }
             }
         } catch (e: Exception) {
-            // Si falla el decode, al menos intentamos pasar la URL de enfun directamente
             loadExtractor(enfun, data, subtitleCallback, callback)
         }
 
@@ -172,13 +197,25 @@ class DramaFun : MainAPI() {
         val linkRaw = selectFirst("a")?.attr("href") ?: attr("href") ?: return null
         val link = if (linkRaw.startsWith("http")) linkRaw else "$mainUrl/$linkRaw"
 
-        val titleRaw = selectFirst("h3")?.text()
+        // Título: preferir .caption h3 a para pm-grid
+        val titleRaw = selectFirst(".caption h3 a")?.text()
+            ?: selectFirst("h3")?.text()
             ?: ownText().trim().ifEmpty { attr("title") }
             ?: return null
 
-        val cleanTitle = titleRaw.replace(Regex("(?i)\\[|\\]|\\(en\\s*Español\\)|Sub\\s*Español|HD|online"), "").trim()
+        // Limpieza para home y categorías
+        val cleanTitle = titleRaw
+            .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\))"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .removeSurrounding("[", "]")
 
-        val poster = selectFirst("img")?.attr("src")?.let { if (it.startsWith("http")) it else "$mainUrl/$it" }
+        if (cleanTitle.isBlank()) return null
+
+        // Poster: data-echo primero (lazy load en pm-grid)
+        val posterRaw = selectFirst("img[data-echo]")?.attr("data-echo")
+            ?: selectFirst("img")?.attr("src")
+        val poster = if (posterRaw?.startsWith("http") == true) posterRaw else posterRaw?.let { "$mainUrl/$it" }
 
         return newTvSeriesSearchResponse(
             cleanTitle,
