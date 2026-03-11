@@ -16,14 +16,8 @@ class DramaFun : MainAPI() {
         TvType.Movie
     )
 
-    private val chromeUA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-
     private suspend fun getDoc(url: String) =
-        app.get(
-            url,
-            headers = mapOf("User-Agent" to chromeUA)
-        ).document
+        app.get(url).document
 
     override suspend fun getMainPage(
         page: Int,
@@ -34,17 +28,25 @@ class DramaFun : MainAPI() {
 
             Pair("Popular", "$mainUrl/popular.php"),
 
-            Pair("Doramas Sub Español",
-                "$mainUrl/category/doramas-sub-espanol"),
+            Pair(
+                "Doramas Sub Español",
+                "$mainUrl/category/doramas-sub-espanol"
+            ),
 
-            Pair("Anime",
-                "$mainUrl/category/anime"),
+            Pair(
+                "Anime",
+                "$mainUrl/category/anime"
+            ),
 
-            Pair("Series",
-                "$mainUrl/category/series"),
+            Pair(
+                "Series",
+                "$mainUrl/category/series"
+            ),
 
-            Pair("Reality TV",
-                "$mainUrl/category/reality-tv"),
+            Pair(
+                "Reality TV",
+                "$mainUrl/category/reality-tv"
+            ),
 
             Pair(
                 "Películas Subtituladas",
@@ -57,24 +59,23 @@ class DramaFun : MainAPI() {
             )
         )
 
-        val lists = sections.map { (title, url) ->
+        val home = sections.map { (title, url) ->
 
             val doc = getDoc(url)
 
             val items = doc.select("div.col-xs-6.col-sm-4.col-md-3").mapNotNull {
 
                 val a = it.selectFirst("a") ?: return@mapNotNull null
-
                 val link = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
 
                 val img = it.selectFirst("img")
-
-                val poster = fixUrlNull(img?.attr("src"))
 
                 val name =
                     img?.attr("alt")
                         ?: a.attr("title")
                         ?: return@mapNotNull null
+
+                val poster = fixUrlNull(img?.attr("src"))
 
                 newTvSeriesSearchResponse(name, link) {
                     this.posterUrl = poster
@@ -84,7 +85,7 @@ class DramaFun : MainAPI() {
             HomePageList(title, items)
         }
 
-        return HomePageResponse(lists)
+        return newHomePageResponse(home)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -99,14 +100,14 @@ class DramaFun : MainAPI() {
 
             val img = it.selectFirst("img")
 
-            val title =
+            val name =
                 img?.attr("alt")
                     ?: a.attr("title")
                     ?: return@mapNotNull null
 
-            val poster = fixUrlNull(img.attr("src"))
+            val poster = fixUrlNull(img?.attr("src"))
 
-            newTvSeriesSearchResponse(title, link) {
+            newTvSeriesSearchResponse(name, link) {
                 this.posterUrl = poster
             }
         }
@@ -117,8 +118,7 @@ class DramaFun : MainAPI() {
         val doc = getDoc(url)
 
         val title =
-            doc.selectFirst("h1")
-                ?.text()
+            doc.selectFirst("h1")?.text()
                 ?: "Drama"
 
         val poster =
