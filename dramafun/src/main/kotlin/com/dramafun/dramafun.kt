@@ -27,17 +27,45 @@ class DramaFun : MainAPI() {
 
         val home = mutableListOf<HomePageList>()
 
+        // Categorías chingonas agregadas
+        val nuevos = getCategory("$mainUrl/newvideos.php")
         val top = getCategory("$mainUrl/topvideos.php")
-        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
-        val doramas = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
-        val nuevos = getCategory("$mainUrl/newvideos.php")  // agregué nuevos para que veas lo último
+        val doramasSub = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
+        val novelasTurcasAudio = getCategory("$mainUrl/category.php?cat=series-y-novelas-turcas-en-espanol")
+        val novelasTurcasSub = getCategory("$mainUrl/category.php?cat=novelas-turcas-subtituladas")
+        val novelasCompletas = getCategory("$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas")
+        val anime = getCategory("$mainUrl/category.php?cat=Anime")
+        val peliculasLatino = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
+        val peliculasSub = getCategory("$mainUrl/category.php?cat=peliculas-subtituladas")
+        val series = getCategory("$mainUrl/category.php?cat=Series")
+        val reality = getCategory("$mainUrl/category.php?cat=Reality-TV")
 
-        home.add(HomePageList("Nuevos Episodios", nuevos))
-        home.add(HomePageList("Top Videos", top))
-        home.add(HomePageList("Películas Latino", peliculas))
-        home.add(HomePageList("Doramas Sub Español", doramas))
+        // Agregamos solo las que tengan contenido
+        if (nuevos.isNotEmpty()) home.add(HomePageList("Nuevos Episodios", deduplicateSeries(nuevos)))
+        if (top.isNotEmpty()) home.add(HomePageList("Top Videos", deduplicateSeries(top)))
+        if (doramasSub.isNotEmpty()) home.add(HomePageList("Doramas Sub Español", deduplicateSeries(doramasSub)))
+        if (novelasTurcasAudio.isNotEmpty()) home.add(HomePageList("Novelas Turcas Audio", deduplicateSeries(novelasTurcasAudio)))
+        if (novelasTurcasSub.isNotEmpty()) home.add(HomePageList("Novelas Turcas Sub", deduplicateSeries(novelasTurcasSub)))
+        if (novelasCompletas.isNotEmpty()) home.add(HomePageList("Novelas y Telenovelas Completas", deduplicateSeries(novelasCompletas)))
+        if (anime.isNotEmpty()) home.add(HomePageList("Anime", deduplicateSeries(anime)))
+        if (peliculasLatino.isNotEmpty()) home.add(HomePageList("Películas Latino", peliculasLatino)) // películas no necesitan deduplicar
+        if (peliculasSub.isNotEmpty()) home.add(HomePageList("Películas Subtituladas", peliculasSub))
+        if (series.isNotEmpty()) home.add(HomePageList("Series", deduplicateSeries(series)))
+        if (reality.isNotEmpty()) home.add(HomePageList("Reality TV", deduplicateSeries(reality)))
 
         return newHomePageResponse(home)
+    }
+
+    // Función para mostrar solo 1 entrada por serie (la más reciente)
+    private fun deduplicateSeries(list: List<SearchResponse>): List<SearchResponse> {
+        val seen = mutableMapOf<String, SearchResponse>()
+        list.forEach { item ->
+            val key = item.name.lowercase().trim() // clave por nombre limpio
+            if (!seen.containsKey(key)) {
+                seen[key] = item
+            }
+        }
+        return seen.values.toList()
     }
 
     // ================= CATEGORY / LISTAS =================
@@ -46,7 +74,6 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(url).document
 
-        // El sitio ya no usa ul.pm-ul-browse-videos → usamos los <a> con watch.php?vid=
         return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
     }
 
@@ -78,7 +105,6 @@ class DramaFun : MainAPI() {
 
         val plot = doc.selectFirst(".pm-series-description p, .pm-video-description p")?.text()?.trim()
 
-        // Episodios: desktop (ul.s) o mobile (select.episodeoption)
         val episodesDesktop = doc.select("ul.s a[href*=watch.php?vid=]")
         val episodesMobile = doc.select("select.episodeoption option[value*=watch.php?vid=]")
 
@@ -98,7 +124,7 @@ class DramaFun : MainAPI() {
                 newEpisode(epUrl) {
                     name = "Capítulo $epNum"
                     episode = epNum
-                    season = 1  // solo 1 por ahora
+                    season = 1
                 }
             }
 
@@ -113,7 +139,6 @@ class DramaFun : MainAPI() {
             }
         }
 
-        // Si no hay episodios → movie o episodio suelto
         return newMovieLoadResponse(
             cleanTitle,
             url,
@@ -136,30 +161,32 @@ class DramaFun : MainAPI() {
 
         val doc = app.get(data).document
 
-        // Buscamos los enlaces xtgo o cualquier a con enfun.php?post=
-        val enfun = doc.selectFirst("a.xtgo[href*=enfun.php?post=]")?.attr("href")
-            ?: doc.select("a[href*=enfun.php?post=]").firstOrNull()?.attr("href")
+        val enfun = doc.selectFirst("a.xtgo")?.attr("href")
             ?: return false
 
         val post = enfun.substringAfter("post=")
 
-        try {
-            val decoded = String(Base64.decode(post, Base64.DEFAULT))
-            val json = JSONObject(decoded)
+        val decoded =
+            String(Base64.decode(post, Base64.DEFAULT))
 
-            if (json.has("servers")) {
-                val servers = json.getJSONObject("servers")
-                val keys = servers.keys()
+        val json = JSONObject(decoded)
 
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    val server = servers.getString(key)
-                    loadExtractor(server, data, subtitleCallback, callback)
-                }
-            }
-        } catch (e: Exception) {
-            // Si falla el decode, al menos intentamos pasar la URL de enfun directamente
-            loadExtractor(enfun, data, subtitleCallback, callback)
+        val servers = json.getJSONObject("servers")
+
+        val keys = servers.keys()
+
+        while (keys.hasNext()) {
+
+            val key = keys.next()
+
+            val server = servers.getString(key)
+
+            loadExtractor(
+                server,
+                data,
+                subtitleCallback,
+                callback
+            )
         }
 
         return true
@@ -178,7 +205,7 @@ class DramaFun : MainAPI() {
 
         val cleanTitle = titleRaw.replace(Regex("(?i)\\[|\\]|\\(en\\s*Español\\)|Sub\\s*Español|HD|online"), "").trim()
 
-        // Cambio ÚNICO: priorizamos data-echo para las carátulas lazy load
+        // Imagen: priorizamos data-echo para carátulas lazy load
         val posterRaw = selectFirst("img[data-echo]")?.attr("data-echo")
             ?: selectFirst("img")?.attr("src")
         val poster = if (posterRaw?.startsWith("http") == true) posterRaw
