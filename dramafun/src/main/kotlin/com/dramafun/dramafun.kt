@@ -27,45 +27,17 @@ class DramaFun : MainAPI() {
 
         val home = mutableListOf<HomePageList>()
 
-        // Categorías chingonas agregadas
-        val nuevos = getCategory("$mainUrl/newvideos.php")
-        val top = getCategory("$mainUrl/topvideos.php")
-        val doramasSub = getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol")
-        val novelasTurcasAudio = getCategory("$mainUrl/category.php?cat=series-y-novelas-turcas-en-espanol")
-        val novelasTurcasSub = getCategory("$mainUrl/category.php?cat=novelas-turcas-subtituladas")
-        val novelasCompletas = getCategory("$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas")
-        val anime = getCategory("$mainUrl/category.php?cat=Anime")
-        val peliculasLatino = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino")
-        val peliculasSub = getCategory("$mainUrl/category.php?cat=peliculas-subtituladas")
-        val series = getCategory("$mainUrl/category.php?cat=Series")
-        val reality = getCategory("$mainUrl/category.php?cat=Reality-TV")
+        val nuevos = cleanAndDeduplicate(getCategory("$mainUrl/newvideos.php"))
+        val top = cleanAndDeduplicate(getCategory("$mainUrl/topvideos.php"))
+        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino") // películas no deduplicar
+        val doramas = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol"))
 
-        // Agregamos solo las que tengan contenido
-        if (nuevos.isNotEmpty()) home.add(HomePageList("Nuevos Episodios", deduplicateSeries(nuevos)))
-        if (top.isNotEmpty()) home.add(HomePageList("Top Videos", deduplicateSeries(top)))
-        if (doramasSub.isNotEmpty()) home.add(HomePageList("Doramas Sub Español", deduplicateSeries(doramasSub)))
-        if (novelasTurcasAudio.isNotEmpty()) home.add(HomePageList("Novelas Turcas Audio", deduplicateSeries(novelasTurcasAudio)))
-        if (novelasTurcasSub.isNotEmpty()) home.add(HomePageList("Novelas Turcas Sub", deduplicateSeries(novelasTurcasSub)))
-        if (novelasCompletas.isNotEmpty()) home.add(HomePageList("Novelas y Telenovelas Completas", deduplicateSeries(novelasCompletas)))
-        if (anime.isNotEmpty()) home.add(HomePageList("Anime", deduplicateSeries(anime)))
-        if (peliculasLatino.isNotEmpty()) home.add(HomePageList("Películas Latino", peliculasLatino)) // películas no necesitan deduplicar
-        if (peliculasSub.isNotEmpty()) home.add(HomePageList("Películas Subtituladas", peliculasSub))
-        if (series.isNotEmpty()) home.add(HomePageList("Series", deduplicateSeries(series)))
-        if (reality.isNotEmpty()) home.add(HomePageList("Reality TV", deduplicateSeries(reality)))
+        home.add(HomePageList("Nuevos Episodios", nuevos))
+        home.add(HomePageList("Top Videos", top))
+        home.add(HomePageList("Películas Latino", peliculas))
+        home.add(HomePageList("Doramas Sub Español", doramas))
 
         return newHomePageResponse(home)
-    }
-
-    // Función para mostrar solo 1 entrada por serie (la más reciente)
-    private fun deduplicateSeries(list: List<SearchResponse>): List<SearchResponse> {
-        val seen = mutableMapOf<String, SearchResponse>()
-        list.forEach { item ->
-            val key = item.name.lowercase().trim() // clave por nombre limpio
-            if (!seen.containsKey(key)) {
-                seen[key] = item
-            }
-        }
-        return seen.values.toList()
     }
 
     // ================= CATEGORY / LISTAS =================
@@ -75,6 +47,26 @@ class DramaFun : MainAPI() {
         val doc = app.get(url).document
 
         return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
+    }
+
+    // ================= Función para limpiar y deduplicar por nombre base =================
+    private fun cleanAndDeduplicate(items: List<SearchResponse>): List<SearchResponse> {
+        val seen = mutableMapOf<String, SearchResponse>() // clave: nombre base limpio
+
+        items.forEach { item ->
+            // Nombre base: quitamos capítulo/episodio y basura
+            val baseName = item.name
+                .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\)|\\d+).*"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .lowercase()
+
+            if (baseName.isNotBlank() && !seen.containsKey(baseName)) {
+                seen[baseName] = item.copy(name = item.name.replace(Regex("(?i)(capitulo|episodio).*"), "").trim()) // título más limpio
+            }
+        }
+
+        return seen.values.toList()
     }
 
     // ================= SEARCH =================
@@ -124,7 +116,7 @@ class DramaFun : MainAPI() {
                 newEpisode(epUrl) {
                     name = "Capítulo $epNum"
                     episode = epNum
-                    season = 1
+                    season = 1  // solo 1 por ahora
                 }
             }
 
@@ -205,7 +197,6 @@ class DramaFun : MainAPI() {
 
         val cleanTitle = titleRaw.replace(Regex("(?i)\\[|\\]|\\(en\\s*Español\\)|Sub\\s*Español|HD|online"), "").trim()
 
-        // Imagen: priorizamos data-echo para carátulas lazy load
         val posterRaw = selectFirst("img[data-echo]")?.attr("data-echo")
             ?: selectFirst("img")?.attr("src")
         val poster = if (posterRaw?.startsWith("http") == true) posterRaw
