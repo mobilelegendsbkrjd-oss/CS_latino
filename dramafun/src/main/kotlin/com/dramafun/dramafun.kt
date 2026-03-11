@@ -29,65 +29,83 @@ class DramaFun : MainAPI() {
 
         val nuevos = cleanAndDeduplicate(getCategory("$mainUrl/newvideos.php"))
         val top = cleanAndDeduplicate(getCategory("$mainUrl/topvideos.php"))
-        val peliculas = getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino") // no deduplicar películas
-        val doramas = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol"))
+        val doramasSub = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=Doramas-Sub-Espanol"))
+        val novelasTurcasAudio = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=series-y-novelas-turcas-en-espanol"))
+        val novelasTurcasSub = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=novelas-turcas-subtituladas"))
+        val novelasCompletas = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas"))
+        val anime = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=Anime"))
+        val peliculasLatino = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=peliculas-audio-espanol-latino"))
+        val peliculasSub = cleanAndDeduplicate(getCategory("$mainUrl/category.php?cat=peliculas-subtituladas"))
 
         home.add(HomePageList("Nuevos Episodios", nuevos))
         home.add(HomePageList("Top Videos", top))
-        home.add(HomePageList("Películas Latino", peliculas))
-        home.add(HomePageList("Doramas Sub Español", doramas))
+        home.add(HomePageList("Doramas Sub Español", doramasSub))
+        home.add(HomePageList("Novelas Turcas Audio", novelasTurcasAudio))
+        home.add(HomePageList("Novelas Turcas Sub", novelasTurcasSub))
+        home.add(HomePageList("Novelas y Telenovelas Completas", novelasCompletas))
+        home.add(HomePageList("Anime", anime))
+        home.add(HomePageList("Películas Latino", peliculasLatino))
+        home.add(HomePageList("Películas Subtituladas", peliculasSub))
 
         return newHomePageResponse(home)
     }
 
-    // ================= Limpieza y deduplicación por nombre base =================
+    // ================= Limpieza y deduplicación por nombre base + URL =================
     private fun cleanAndDeduplicate(items: List<SearchResponse>): List<SearchResponse> {
-        val seen = mutableMapOf<String, SearchResponse>() // clave: nombre base limpio
+        val seenByUrl = mutableSetOf<String>() // evita duplicados por URL exacta
+        val seenByName = mutableMapOf<String, SearchResponse>() // evita duplicados por serie
 
         items.forEach { item ->
-            // Nombre base limpio para comparar (ignora capítulo/episodio/etc.)
+            // 1. Evitar duplicado exacto por URL
+            if (item.url in seenByUrl) return@forEach
+            seenByUrl.add(item.url)
+
+            // 2. Nombre base limpio para agrupar series
             val baseName = item.name
                 .replace(Regex("(?i)(capitulo|episodio|online|sub español|HD|completo|ver|pelicula|audio latino|en español|\\d+:\\d+:\\d+|\\(\\d+\\)|\\d+).*"), "")
                 .replace(Regex("\\s+"), " ")
                 .trim()
                 .lowercase()
 
-            if (baseName.isNotBlank() && !seen.containsKey(baseName)) {
-                // Creamos nuevo SearchResponse con título más limpio (sin "Capítulo X")
-                val cleanDisplayName = item.name
-                    .replace(Regex("(?i)(capitulo|episodio).*"), "")
-                    .trim()
+            if (baseName.isNotBlank()) {
+                if (!seenByName.containsKey(baseName)) {
+                    // Título más limpio para mostrar
+                    val cleanDisplayName = item.name
+                        .replace(Regex("(?i)(capitulo|episodio).*"), "")
+                        .trim()
 
-                val newItem = newTvSeriesSearchResponse(
-                    name = cleanDisplayName,
-                    url = item.url
-                ) {
-                    posterUrl = item.posterUrl
+                    val newItem = newTvSeriesSearchResponse(
+                        name = cleanDisplayName,
+                        url = item.url
+                    ) {
+                        posterUrl = item.posterUrl
+                    }
+
+                    seenByName[baseName] = newItem
                 }
-
-                seen[baseName] = newItem
+            } else {
+                // Si no tiene nombre base (películas sueltas), agregar directo
+                seenByName[item.url] = item
             }
         }
 
-        return seen.values.toList()
+        return seenByName.values.toList()
     }
 
     // ================= CATEGORY / LISTAS =================
 
     private suspend fun getCategory(url: String): List<SearchResponse> {
-
         val doc = app.get(url).document
-
         return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
     }
 
-    // ================= SEARCH =================
+    // ================= SEARCH (también deduplicada) =================
 
     override suspend fun search(query: String): List<SearchResponse> {
-
+        if (query.isBlank()) return emptyList()
         val doc = app.get("$mainUrl/search.php?keywords=$query").document
-
-        return doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
+        val results = doc.select("a[href*=watch.php?vid=]").mapNotNull { it.toSearchResult() }
+        return cleanAndDeduplicate(results)
     }
 
     // ================= LOAD =================
