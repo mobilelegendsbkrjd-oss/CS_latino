@@ -2,7 +2,10 @@ package com.dramafun
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import android.util.Base64
+import org.json.JSONObject
 
 class DramaFun : MainAPI() {
 
@@ -12,72 +15,96 @@ class DramaFun : MainAPI() {
     override var lang = "es"
 
     override val supportedTypes = setOf(
-        TvType.Movie,
         TvType.TvSeries
     )
 
-    override val mainPage = mainPageOf(
-        "$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas&page=" to "Novelas",
-        "$mainUrl/newvideos.php?page=" to "Nuevos",
-        "$mainUrl/topvideos.php?page=" to "Populares"
+    private val headers = mapOf(
+        "User-Agent" to USER_AGENT
     )
+
+    // ================= HOME =================
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
 
-        val document = app.get(request.data + page).document
+        val items = mutableListOf<HomePageList>()
 
-        val home = document.select("ul#pm-grid li").mapNotNull {
-            it.toSearchResult()
-        }
-
-        return newHomePageResponse(
-            request.name,
-            home
+        val novelas = getCategory(
+            "$mainUrl/category.php?cat=Novelas-y-Telenovelas-Completas&page=$page"
         )
+
+        items.add(HomePageList("Novelas y Telenovelas", novelas))
+
+        return newHomePageResponse(items, false)
     }
+
+    // ================= CATEGORY =================
+
+    private suspend fun getCategory(url: String): List<SearchResponse> {
+
+        val doc = app.get(url, headers = headers).document
+
+        return doc.select("ul#pm-grid li").mapNotNull { it.toSearchResult() }
+    }
+
+    // ================= SEARCH =================
 
     override suspend fun search(query: String): List<SearchResponse> {
 
-        val document =
-            app.get("$mainUrl/search.php?keywords=$query").document
+        val doc = app.get(
+            "$mainUrl/search.php?keywords=$query",
+            headers = headers
+        ).document
 
-        return document.select("ul#pm-grid li").mapNotNull {
-            it.toSearchResult()
-        }
+        return doc.select("ul#pm-grid li").mapNotNull { it.toSearchResult() }
     }
+
+    // ================= LOAD SERIES =================
 
     override suspend fun load(url: String): LoadResponse {
 
-        val document = app.get(url).document
+        val fixedUrl = if (url.contains("watch.php")) {
 
-        val title =
-            document.selectFirst("meta[property=og:title]")
-                ?.attr("content")
-                ?: document.title()
+            val doc = app.get(url, headers = headers).document
 
-        val poster =
-            document.selectFirst("meta[property=og:image]")
-                ?.attr("content")
+            doc.selectFirst("a[href*=view-serie]")
+                ?.attr("href")
+                ?.let { mainUrl + "/" + it }
+                ?: url
 
-        val description =
-            document.selectFirst("meta[name=description]")
-                ?.attr("content")
+        } else url
 
-        val episode = newEpisode(url)
+        val doc = app.get(fixedUrl, headers = headers).document
 
-        return newMovieLoadResponse(
+        val title = doc.selectFirst("h1")?.text()?.trim() ?: "Drama"
+
+        val poster = doc.selectFirst(".pm-video-thumb img")
+            ?.attr("src")
+
+        val episodes = doc.select("ul.s a").map {
+
+            val epUrl = mainUrl + "/" + it.attr("href")
+
+            val epNum = it.text()
+
+            newEpisode(epUrl) {
+                name = "Episodio $epNum"
+            }
+        }
+
+        return newTvSeriesLoadResponse(
             title,
-            url,
-            TvType.Movie,
-            listOf(episode)
+            fixedUrl,
+            TvType.TvSeries,
+            episodes
         ) {
             posterUrl = poster
-            plot = description
         }
     }
+
+    // ================= LOAD LINKS =================
 
     override suspend fun loadLinks(
         data: String,
@@ -86,15 +113,32 @@ class DramaFun : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val document = app.get(data).document
+        val doc = app.get(data, headers = headers).document
 
-        val iframe =
-            document.selectFirst("iframe")?.attr("src")
+        val enfun = doc.selectFirst("a.xtgo")?.attr("href")
+            ?: return false
 
-        if (iframe != null) {
+        val post = enfun.substringAfter("post=")
+
+        val decoded = String(
+            Base64.decode(post, Base64.DEFAULT)
+        )
+
+        val json = JSONObject(decoded)
+
+        val servers = json.getJSONObject("servers")
+
+        val keys = servers.keys()
+
+        while (keys.hasNext()) {
+
+            val key = keys.next()
+
+            val server = servers.getString(key)
+
             loadExtractor(
-                iframe,
-                mainUrl,
+                server,
+                data,
                 subtitleCallback,
                 callback
             )
@@ -103,26 +147,21 @@ class DramaFun : MainAPI() {
         return true
     }
 
+    // ================= PARSER =================
+
     private fun Element.toSearchResult(): SearchResponse? {
 
-        val link =
-            this.selectFirst("a[href*=watch.php]")
-                ?.attr("href")
-                ?: return null
+        val link = selectFirst("a")?.attr("href") ?: return null
 
-        val title =
-            this.selectFirst(".caption h3 a")
-                ?.text()
-                ?: return null
+        val title = selectFirst("h3")?.text() ?: return null
 
-        val poster =
-            this.selectFirst("img")
-                ?.attr("data-echo")
+        val poster = selectFirst("img")?.attr("src")
 
-        return newMovieSearchResponse(
+        val fixedLink = if (link.startsWith("http")) link else "$mainUrl/$link"
+
+        return newTvSeriesSearchResponse(
             title,
-            fixUrl(link),
-            TvType.Movie
+            fixedLink
         ) {
             this.posterUrl = poster
         }
