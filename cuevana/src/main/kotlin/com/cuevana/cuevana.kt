@@ -90,13 +90,14 @@ data class VideoInfo(
 // MAIN API
 // =============================
 class Cuevana : MainAPI() {
-    override var mainUrl = "https://cuevana3re.net/"
+    override var mainUrl = "http://cuevana3.eu/"
     override var name = "Cuevana"
     override var lang = "es"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+
 
     private val requestHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
