@@ -119,14 +119,13 @@ class TvSeriesLatino : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val encoded = java.net.URLEncoder.encode(data, "UTF-8")
+        val cleanUrl = Regex("(https://[^/]+/e/[a-zA-Z0-9]+)")
+            .find(data)
+            ?.value
+            ?: data
 
-        val playerUrl =
-            "$mainUrl/haz-clic-para-reproducir-el-video-de-abajo/?UrlPok=$encoded"
-
-        // el iframe realmente usa el link directo
         loadExtractor(
-            data,
+            cleanUrl,
             mainUrl,
             subtitleCallback,
             callback
