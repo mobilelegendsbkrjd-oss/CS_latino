@@ -1,7 +1,9 @@
 package com.lamovie
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.fasterxml.jackson.annotation.JsonProperty
 
 class LaMovie : MainAPI() {
 
@@ -10,6 +12,7 @@ class LaMovie : MainAPI() {
     override var lang = "es"
 
     override val hasMainPage = true
+    override val hasQuickSearch = true
 
     override val supportedTypes = setOf(
         TvType.Movie,
@@ -19,88 +22,132 @@ class LaMovie : MainAPI() {
 
     private val api = "$mainUrl/wp-api/v1"
 
+    // ================= FIX IMAGES =================
+
+    private fun fixImg(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+
+        val clean = url.replace("\"", "").trim()
+
+        return when {
+            clean.startsWith("http") -> clean
+            clean.startsWith("/thumbs") -> "$mainUrl/wp-content/uploads$clean"
+            clean.startsWith("/backdrops") -> "$mainUrl/wp-content/uploads$clean"
+            clean.startsWith("/") -> "$mainUrl$clean"
+            else -> "$mainUrl/$clean"
+        }
+    }
+
     // ================= MAIN PAGE =================
 
     override val mainPage = mainPageOf(
-        "$api/search?keyword=a&page=%d" to "Catálogo"
+        "$api/listing/movies?postType=movies" to "Películas",
+        "$api/listing/tvshows?postType=tvshows" to "Series",
+        "$api/listing/animes?postType=animes" to "Anime",
+        "$mainUrl/colecciones" to "Sugerencias de la comunidad"
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
 
-        val doc = app.get(mainUrl).document
+        // ===== COLECCIONES =====
 
-        val items = doc.select(
-            "article.n-movs-1, article.post, div.movie-item, article.item, .film-poster"
-        ).mapNotNull { article ->
+        if (request.data.contains("/colecciones")) {
 
-            val a = article.selectFirst("a[href]") ?: return@mapNotNull null
-            val url = fixUrl(a.attr("href"))
+            val doc = app.get(request.data).document
 
-            val titleElement = article.selectFirst(
-                ".n-movs-15, h3, .title, .film-name, h2"
-            )
+            val items = doc.select("a[href*=/coleccion/]").mapNotNull {
 
-            val title = titleElement?.text()?.trim() ?: return@mapNotNull null
+                val title = it.text().trim()
+                val link = it.attr("href")
 
-            val poster = article.selectFirst("img[data-src], img[src]")?.let {
-                val src = it.attr("data-src").ifBlank { it.attr("src") }
-                fixUrl(src)
+                if (title.isBlank()) return@mapNotNull null
+
+                newTvSeriesSearchResponse(
+                    title,
+                    "lamovie_collection://$link"
+                ) {
+                    posterUrl = it.select("img").attr("src")
+                }
             }
 
-            newMovieSearchResponse(title, url) {
-                this.posterUrl = poster
+            return newHomePageResponse(request.name, items)
+        }
+
+        // ===== API NORMAL =====
+
+        val url =
+            "${request.data}&page=$page&postsPerPage=30&orderBy=latest&order=DESC"
+
+        val json =
+            app.get(url).parsedSafe<ApiListingResponse>()
+                ?: throw ErrorLoadingException()
+
+        val items = json.data.posts.map { post ->
+
+            val poster = fixImg(post.images?.poster)
+
+            val pageUrl = when (post.type) {
+                "movies" -> "$mainUrl/peliculas/${post.slug}"
+                "tvshows" -> "$mainUrl/series/${post.slug}"
+                "animes" -> "$mainUrl/animes/${post.slug}"
+                else -> "$mainUrl/peliculas/${post.slug}"
+            }
+
+            when (post.type) {
+
+                "tvshows" -> newTvSeriesSearchResponse(post.title, pageUrl) {
+                    posterUrl = poster
+                }
+
+                "animes" -> newAnimeSearchResponse(post.title, pageUrl) {
+                    posterUrl = poster
+                }
+
+                else -> newMovieSearchResponse(post.title, pageUrl) {
+                    posterUrl = poster
+                }
             }
         }
 
-        return newHomePageResponse(
-            "Películas y series recientes",
-            items
-        )
+        return newHomePageResponse(request.name, items)
     }
 
     // ================= SEARCH =================
 
-    override suspend fun search(query: String): List<SearchResponse>? {
+    override suspend fun search(query: String): List<SearchResponse> {
 
-        val searchUrl = "$mainUrl/?s=$query"
+        val url =
+            "$api/search?postType=any&q=$query&postsPerPage=26"
 
-        val doc = app.get(searchUrl).document
+        val json =
+            app.get(url).parsedSafe<ApiListingResponse>()
+                ?: return emptyList()
 
-        return doc.select(
-            "article.n-movs-1, .result-item, .film-item"
-        ).mapNotNull {
+        return json.data.posts.map {
 
-            val a = it.selectFirst("a[href]") ?: return@mapNotNull null
-            val url = fixUrl(a.attr("href"))
+            val poster = fixImg(it.images?.poster)
 
-            val title = it.selectFirst("h3, .title, .name, .n-movs-15")
-                ?.text()
-                ?.trim()
-                ?: return@mapNotNull null
-
-            val poster = it.selectFirst("img")?.let { img ->
-                val data = img.attr("data-src")
-                val src = img.attr("src")
-                fixUrl(if (data.isNotBlank()) data else src)
+            val pageUrl = when (it.type) {
+                "movies" -> "$mainUrl/peliculas/${it.slug}"
+                "tvshows" -> "$mainUrl/series/${it.slug}"
+                "animes" -> "$mainUrl/animes/${it.slug}"
+                else -> "$mainUrl/peliculas/${it.slug}"
             }
 
-            val type = when {
-                url.contains("/series/") -> TvType.TvSeries
-                url.contains("/anime/") -> TvType.Anime
-                else -> TvType.Movie
-            }
+            when (it.type) {
 
-            when (type) {
-
-                TvType.TvSeries -> newTvSeriesSearchResponse(title, url) {
+                "tvshows" -> newTvSeriesSearchResponse(it.title, pageUrl) {
                     posterUrl = poster
                 }
 
-                TvType.Anime -> newAnimeSearchResponse(title, url) {
+                "animes" -> newAnimeSearchResponse(it.title, pageUrl) {
                     posterUrl = poster
                 }
 
-                else -> newMovieSearchResponse(title, url) {
+                else -> newMovieSearchResponse(it.title, pageUrl) {
                     posterUrl = poster
                 }
             }
@@ -111,66 +158,165 @@ class LaMovie : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
 
-        val slug = url.substringAfterLast("/")
+        // ===== COLECCION =====
+
+        if (url.startsWith("lamovie_collection://")) {
+
+            val realUrl =
+                url.removePrefix("lamovie_collection://")
+
+            val doc = app.get(realUrl).document
+
+            val title =
+                doc.selectFirst("h1")?.text()
+                    ?: "Colección"
+
+            val poster =
+                doc.selectFirst("img")?.attr("src")
+
+            val episodes =
+                doc.select("a[href*=/peliculas/]")
+                    .mapIndexed { index, el ->
+
+                        val movieUrl = el.attr("href")
+
+                        val movieTitle =
+                            el.text().ifBlank {
+                                "Película ${index + 1}"
+                            }
+
+                        newEpisode(movieUrl) {
+                            name = movieTitle
+                            episode = index + 1
+                        }
+                    }
+
+            return newTvSeriesLoadResponse(
+                title,
+                url,
+                TvType.TvSeries,
+                episodes
+            ) {
+
+                posterUrl = poster
+                backgroundPosterUrl = poster
+            }
+        }
+
+        // ===== NORMAL =====
+
+        val slug =
+            url.trimEnd('/').substringAfterLast("/")
 
         val type = when {
-            url.contains("/peliculas/") -> "movies"
             url.contains("/series/") -> "tvshows"
             url.contains("/animes/") -> "animes"
             else -> "movies"
         }
 
-        val apiUrl = "$api/single/$type?slug=$slug&postType=$type"
+        val apiUrl =
+            "$api/single/$type?slug=$slug&postType=$type"
 
-        val json = app.get(apiUrl)
-            .parsedSafe<ApiSingleResponse>() ?: throw ErrorLoadingException()
+        val json =
+            app.get(apiUrl).parsedSafe<ApiSingleResponse>()
+                ?: throw ErrorLoadingException()
 
         val data = json.data
 
-        val poster = mainUrl + data.images.poster
-        val backdrop = mainUrl + data.images.backdrop
+        val poster = fixImg(data.images?.poster)
+        val backdrop = fixImg(data.images?.backdrop)
 
-        if (type == "movies") {
+        // ===== SERIES =====
 
-            return newMovieLoadResponse(
-                data.title,
-                url,
-                TvType.Movie,
-                data._id.toString()
-            ) {
-                posterUrl = poster
-                backgroundPosterUrl = backdrop
-                plot = data.overview
-                year = data.release_date.take(4).toIntOrNull()
-            }
+        if (type == "tvshows" || type == "animes") {
 
-        } else {
+            val episodes = mutableListOf<Episode>()
 
-            val episodesApi = "$api/episodes?_id=${data._id}&type=tvshows"
+            try {
 
-            val epJson = app.get(episodesApi)
-                .parsedSafe<ApiEpisodesResponse>() ?: throw ErrorLoadingException()
+                val firstSeasonUrl =
+                    "$api/single/episodes/list?_id=${data._id}&season=1&postsPerPage=50"
 
-            val episodes = epJson.data.posts.map {
+                val firstSeason =
+                    app.get(firstSeasonUrl)
+                        .parsedSafe<ApiEpisodeResponse>()
 
-                newEpisode(it._id.toString()) {
-                    name = it.title
-                    season = it.season_number
-                    episode = it.episode_number
+                val seasons =
+                    firstSeason?.data?.seasons ?: listOf("1")
+
+                seasons.forEach { seasonStr ->
+
+                    val season =
+                        seasonStr.toIntOrNull()
+                            ?: return@forEach
+
+                    val epUrl =
+                        "$api/single/episodes/list?_id=${data._id}&season=$season&postsPerPage=50"
+
+                    val epJson =
+                        app.get(epUrl)
+                            .parsedSafe<ApiEpisodeResponse>()
+
+                    epJson?.data?.posts?.forEach { ep ->
+
+                        val cleanId =
+                            Regex("""\d+""")
+                                .find(ep._id.toString())
+                                ?.value ?: ep._id.toString()
+
+                        episodes.add(
+                            newEpisode(cleanId) {
+
+                                name =
+                                    ep.title
+                                        ?: "Episodio ${ep.episode_number}"
+
+                                this.season = season
+                                this.episode = ep.episode_number
+
+                                posterUrl =
+                                    fixImg(ep.still_path)
+                            }
+                        )
+                    }
                 }
+
+            } catch (_: Exception) {
             }
+
+            val tvType =
+                if (type == "animes")
+                    TvType.Anime
+                else
+                    TvType.TvSeries
 
             return newTvSeriesLoadResponse(
                 data.title,
                 url,
-                TvType.TvSeries,
+                tvType,
                 episodes
             ) {
+
                 posterUrl = poster
                 backgroundPosterUrl = backdrop
                 plot = data.overview
-                year = data.release_date.take(4).toIntOrNull()
+                year = data.release_date?.take(4)?.toIntOrNull()
             }
+        }
+
+        // ===== MOVIE =====
+
+        return newMovieLoadResponse(
+            data.title,
+            url,
+            TvType.Movie,
+            data._id.toString()
+        ) {
+
+            posterUrl = poster
+            backgroundPosterUrl = backdrop
+            plot = data.overview
+            year = data.release_date?.take(4)?.toIntOrNull()
         }
     }
 
@@ -183,39 +329,64 @@ class LaMovie : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val json = app.get("$api/player?postId=$data")
-            .parsedSafe<ApiPlayerResponse>() ?: return false
+        val cleanId =
+            Regex("""\d+""").find(data)?.value ?: data
 
-        json.data.embeds.forEach {
+        val json =
+            app.get("$api/player?postId=$cleanId&demo=0")
+                .parsedSafe<ApiPlayerResponse>()
+                ?: return false
 
-            loadExtractor(
-                it.url,
-                mainUrl,
-                subtitleCallback,
-                callback
-            )
+        json.data.embeds.forEach { embed ->
+
+            val url = embed.url ?: return@forEach
+
+            if (url.contains("la.movie/embed")) {
+
+                val doc = app.get(url).document
+                val iframe = doc.select("iframe").attr("src")
+
+                if (iframe.isNotBlank()) {
+
+                    loadExtractor(
+                        iframe,
+                        url,
+                        subtitleCallback,
+                        callback
+                    )
+                }
+
+            } else {
+
+                loadExtractor(
+                    url,
+                    mainUrl,
+                    subtitleCallback,
+                    callback
+                )
+            }
         }
 
         return true
     }
 }
 
-// ================= API MODELS =================
+// ================= DATA =================
 
-data class ApiSearchResponse(
-    val data: ApiSearchData
+data class ApiListingResponse(
+    val data: ApiListingData
 )
 
-data class ApiSearchData(
-    val posts: List<ApiSearchItem>
+data class ApiListingData(
+    val posts: List<ApiPost>
 )
 
-data class ApiSearchItem(
+data class ApiPost(
     val _id: Int,
     val title: String,
     val slug: String,
-    val poster: String,
-    val type: String
+    val type: String,
+    val images: ApiImages?
 )
 
 data class ApiSingleResponse(
@@ -226,28 +397,29 @@ data class ApiSingleData(
     val _id: Int,
     val title: String,
     val overview: String?,
-    val release_date: String,
-    val images: ApiImages
+    val release_date: String?,
+    val images: ApiImages?
 )
 
 data class ApiImages(
-    val poster: String,
-    val backdrop: String
+    val poster: String?,
+    val backdrop: String?
 )
 
-data class ApiEpisodesResponse(
-    val data: ApiEpisodesData
+data class ApiEpisodeResponse(
+    val data: ApiEpisodeData
 )
 
-data class ApiEpisodesData(
-    val posts: List<ApiEpisodeItem>
+data class ApiEpisodeData(
+    val posts: List<ApiEpisode>,
+    val seasons: List<String>?
 )
 
-data class ApiEpisodeItem(
-    val _id: Int,
-    val title: String,
-    val season_number: Int,
-    val episode_number: Int
+data class ApiEpisode(
+    @JsonProperty("_id") val _id: Int,
+    val title: String?,
+    val episode_number: Int?,
+    val still_path: String?
 )
 
 data class ApiPlayerResponse(
@@ -259,5 +431,5 @@ data class ApiPlayerData(
 )
 
 data class ApiEmbed(
-    val url: String
+    val url: String?
 )
