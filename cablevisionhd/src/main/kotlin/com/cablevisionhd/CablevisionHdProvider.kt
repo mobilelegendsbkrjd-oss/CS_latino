@@ -1,4 +1,4 @@
-package com.cablevision
+package com.cablevisionhd
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
@@ -24,12 +24,12 @@ class CablevisionHdProvider : MainAPI() {
     // ================================
 
     override suspend fun load(url: String): LoadResponse {
+
         val doc = app.get(url).document
 
-        val title = doc.selectFirst("h1, h2, .entry-title, .title")
-            ?.text()
-            ?.trim()
-            ?: "Canal en Vivo"
+        val title = doc.selectFirst(
+            "h1, h2, .entry-title, .title"
+        )?.text()?.trim() ?: "Canal en Vivo"
 
         val poster = doc.selectFirst(
             "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
@@ -38,8 +38,7 @@ class CablevisionHdProvider : MainAPI() {
                 doc.selectFirst(
                     "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
                 )?.attr("src")
-            }
-            ?: ""
+            } ?: ""
 
         return newMovieLoadResponse(
             title,
@@ -54,7 +53,7 @@ class CablevisionHdProvider : MainAPI() {
     }
 
     // ================================
-    // MODERN LOADLINKS
+    // LOAD LINKS
     // ================================
 
     override suspend fun loadLinks(
@@ -77,7 +76,7 @@ class CablevisionHdProvider : MainAPI() {
             // DIRECT MP4
             Regex("""["'](https?://[^"']+\.mp4[^"']*)["']"""),
 
-            // JWPLAYER / PLAYER CONFIGS
+            // PLAYER CONFIGS
             Regex("""source\s*:\s*["']([^"']+)["']"""),
             Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']"""),
             Regex("""file\s*:\s*["']([^"']+)["']"""),
@@ -86,7 +85,7 @@ class CablevisionHdProvider : MainAPI() {
             Regex("""var\s+src\s*=\s*["']([^"']+)["']"""),
             Regex("""src\s*:\s*["']([^"']+)["']"""),
 
-            // JSON STYLE
+            // JSON
             Regex(""""url"\s*:\s*"([^"]+)""""),
             Regex(""""file"\s*:\s*"([^"]+)"""")
         )
@@ -108,7 +107,7 @@ class CablevisionHdProvider : MainAPI() {
                 val document = response.document
 
                 // ================================
-                // DIRECT PATTERN SEARCH
+                // DIRECT SEARCH
                 // ================================
 
                 for (pattern in patterns) {
@@ -128,19 +127,21 @@ class CablevisionHdProvider : MainAPI() {
                         ) {
 
                             callback.invoke(
-                                ExtractorLink(
-                                    name,
-                                    name,
-                                    found,
-                                    referer,
-                                    Qualities.getQualityFromName("HD"),
-                                    isM3u8 = found.contains(".m3u8"),
-                                    headers = mapOf(
+                                newExtractorLink(
+                                    source = name,
+                                    name = name,
+                                    url = found
+                                ) {
+                                    this.referer = referer
+                                    this.quality = Qualities.Unknown.value
+                                    this.isM3u8 = found.contains(".m3u8")
+
+                                    this.headers = mapOf(
                                         "User-Agent" to USER_AGENT,
                                         "Referer" to referer,
                                         "Origin" to mainUrl
                                     )
-                                )
+                                }
                             )
 
                             return true
@@ -179,18 +180,20 @@ class CablevisionHdProvider : MainAPI() {
                                     ) {
 
                                         callback.invoke(
-                                            ExtractorLink(
-                                                name,
-                                                name,
-                                                found,
-                                                referer,
-                                                Qualities.getQualityFromName("HD"),
-                                                isM3u8 = found.contains(".m3u8"),
-                                                headers = mapOf(
+                                            newExtractorLink(
+                                                source = name,
+                                                name = name,
+                                                url = found
+                                            ) {
+                                                this.referer = referer
+                                                this.quality = Qualities.Unknown.value
+                                                this.isM3u8 = found.contains(".m3u8")
+
+                                                this.headers = mapOf(
                                                     "User-Agent" to USER_AGENT,
                                                     "Referer" to referer
                                                 )
-                                            )
+                                            }
                                         )
 
                                         return true
@@ -222,7 +225,7 @@ class CablevisionHdProvider : MainAPI() {
                                     return@repeat
                                 }
 
-                                // DIRECT URL
+                                // DIRECT STREAM
                                 if (
                                     decoded.contains(".m3u8") ||
                                     decoded.contains(".mp4")
@@ -236,18 +239,20 @@ class CablevisionHdProvider : MainAPI() {
                                     if (!stream.isNullOrBlank()) {
 
                                         callback.invoke(
-                                            ExtractorLink(
-                                                name,
-                                                name,
-                                                clean(stream),
-                                                referer,
-                                                Qualities.getQualityFromName("HD"),
-                                                isM3u8 = stream.contains(".m3u8"),
-                                                headers = mapOf(
+                                            newExtractorLink(
+                                                source = name,
+                                                name = name,
+                                                url = clean(stream)
+                                            ) {
+                                                this.referer = referer
+                                                this.quality = Qualities.Unknown.value
+                                                this.isM3u8 = stream.contains(".m3u8")
+
+                                                this.headers = mapOf(
                                                     "User-Agent" to USER_AGENT,
                                                     "Referer" to referer
                                                 )
-                                            )
+                                            }
                                         )
 
                                         return true
@@ -337,6 +342,7 @@ class CablevisionHdProvider : MainAPI() {
     // ================================
 
     private fun clean(raw: String): String {
+
         return raw
             .replace("\\/", "/")
             .replace("\\u0026", "&")
