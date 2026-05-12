@@ -1,27 +1,28 @@
-package com.cablevisionhd
+package com.cablevision
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Document
 
 class CablevisionHdProvider : MainAPI() {
 
     override var mainUrl = "https://www.cablevisionhd.com"
     override var name = "CablevisionHd"
     override var lang = "es"
+
     override val hasQuickSearch = false
     override val hasMainPage = true
     override val hasChromecastSupport = true
     override val hasDownloadSupport = true
+
     override val supportedTypes = setOf(TvType.Live)
 
     private val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // ================================
-    // BASIC LOAD
-    // ================================
+    // =========================================
+    // LOAD
+    // =========================================
 
     override suspend fun load(url: String): LoadResponse {
 
@@ -52,9 +53,9 @@ class CablevisionHdProvider : MainAPI() {
         }
     }
 
-    // ================================
+    // =========================================
     // LOAD LINKS
-    // ================================
+    // =========================================
 
     override suspend fun loadLinks(
         data: String,
@@ -106,9 +107,9 @@ class CablevisionHdProvider : MainAPI() {
                 val html = response.text
                 val document = response.document
 
-                // ================================
+                // =========================================
                 // DIRECT SEARCH
-                // ================================
+                // =========================================
 
                 for (pattern in patterns) {
 
@@ -130,13 +131,10 @@ class CablevisionHdProvider : MainAPI() {
                                 newExtractorLink(
                                     source = name,
                                     name = name,
-                                    url = found
+                                    url = found,
+                                    type = INFER_TYPE
                                 ) {
-                                    this.referer = referer
-                                    this.quality = Qualities.Unknown.value
-                                    this.isM3u8 = found.contains(".m3u8")
-
-                                    this.headers = mapOf(
+                                    headers = mapOf(
                                         "User-Agent" to USER_AGENT,
                                         "Referer" to referer,
                                         "Origin" to mainUrl
@@ -149,9 +147,9 @@ class CablevisionHdProvider : MainAPI() {
                     }
                 }
 
-                // ================================
+                // =========================================
                 // PACKED EVAL
-                // ================================
+                // =========================================
 
                 Regex(
                     """eval\(function\(p,a,c,k,e,[^)]*\).*?\)""",
@@ -183,13 +181,10 @@ class CablevisionHdProvider : MainAPI() {
                                             newExtractorLink(
                                                 source = name,
                                                 name = name,
-                                                url = found
+                                                url = found,
+                                                type = INFER_TYPE
                                             ) {
-                                                this.referer = referer
-                                                this.quality = Qualities.Unknown.value
-                                                this.isM3u8 = found.contains(".m3u8")
-
-                                                this.headers = mapOf(
+                                                headers = mapOf(
                                                     "User-Agent" to USER_AGENT,
                                                     "Referer" to referer
                                                 )
@@ -205,9 +200,9 @@ class CablevisionHdProvider : MainAPI() {
                         }
                     }
 
-                // ================================
+                // =========================================
                 // BASE64 CASCADE
-                // ================================
+                // =========================================
 
                 Regex("""atob\(["']([^"']+)["']\)""")
                     .findAll(html)
@@ -242,13 +237,10 @@ class CablevisionHdProvider : MainAPI() {
                                             newExtractorLink(
                                                 source = name,
                                                 name = name,
-                                                url = clean(stream)
+                                                url = clean(stream),
+                                                type = INFER_TYPE
                                             ) {
-                                                this.referer = referer
-                                                this.quality = Qualities.Unknown.value
-                                                this.isM3u8 = stream.contains(".m3u8")
-
-                                                this.headers = mapOf(
+                                                headers = mapOf(
                                                     "User-Agent" to USER_AGENT,
                                                     "Referer" to referer
                                                 )
@@ -281,9 +273,9 @@ class CablevisionHdProvider : MainAPI() {
                         }
                     }
 
-                // ================================
+                // =========================================
                 // IFRAME FOLLOW
-                // ================================
+                // =========================================
 
                 val iframe =
                     document.selectFirst("iframe[src]")?.attr("src")
@@ -307,9 +299,9 @@ class CablevisionHdProvider : MainAPI() {
                     }
                 }
 
-                // ================================
+                // =========================================
                 // EMBED SEARCH
-                // ================================
+                // =========================================
 
                 val embed =
                     Regex("""https?://[^\s"'\\]+(?:embed|player|stream)[^\s"'\\]*""")
@@ -337,9 +329,9 @@ class CablevisionHdProvider : MainAPI() {
         return false
     }
 
-    // ================================
+    // =========================================
     // CLEAN URLS
-    // ================================
+    // =========================================
 
     private fun clean(raw: String): String {
 
