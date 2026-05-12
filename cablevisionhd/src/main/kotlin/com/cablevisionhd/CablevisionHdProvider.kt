@@ -3,6 +3,8 @@ package com.cablevision
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 class CablevisionHdProvider : MainAPI() {
 
@@ -17,29 +19,325 @@ class CablevisionHdProvider : MainAPI() {
 
     override val supportedTypes = setOf(TvType.Live)
 
+    override val mainPage = mainPageOf(
+        "$mainUrl" to "Canales"
+    )
+
     private val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // =========================================
-    // LOAD
-    // =========================================
+    // =====================================================
+    // PARSE CHANNELS
+    // =====================================================
 
-    override suspend fun load(url: String): LoadResponse {
+    private fun parseChannels(doc: Document): List<SearchResponse> {
+
+        val results = mutableListOf<SearchResponse>()
+
+        // =========================================
+        // SCRIPT CHANNELS
+        // =========================================
+
+        doc.select("script").forEach { script ->
+
+            val data = script.data()
+
+            if (
+                data.contains("homeChannels") ||
+                data.contains("const channels")
+            ) {
+
+                try {
+
+                    val htmlInsideScript =
+                        data.substringAfter("`")
+                            .substringBeforeLast("`")
+
+                    if (htmlInsideScript.length > 100) {
+
+                        val scriptDoc = Jsoup.parse(htmlInsideScript)
+
+                        scriptDoc.select("a").forEach { a ->
+
+                            val link = a.attr("href")
+
+                            val title = a.text()
+                                .trim()
+                                .ifEmpty {
+                                    a.selectFirst("img")
+                                        ?.attr("alt")
+                                        ?: ""
+                                }
+
+                            val imgElement =
+                                a.select("img").firstOrNull { img ->
+
+                                    val src =
+                                        img.attr("src").lowercase()
+
+                                    !src.contains("paypal") &&
+                                            !src.contains("pago") &&
+                                            !src.contains("donar") &&
+                                            !src.contains("qr") &&
+                                            src.isNotEmpty()
+                                } ?: a.selectFirst("img")
+
+                            val rawImg =
+                                imgElement?.attr("src") ?: ""
+
+                            val img =
+                                if (rawImg.startsWith("http")) rawImg
+                                else "$mainUrl/${rawImg.removePrefix("/")}"
+
+                            if (isValidChannel(link, title)) {
+
+                                val finalUrl =
+                                    if (link.startsWith("http")) link
+                                    else "$mainUrl/${link.removePrefix("/")}"
+
+                                results.add(
+                                    newMovieSearchResponse(
+                                        title,
+                                        finalUrl,
+                                        TvType.Live
+                                    ) {
+                                        this.posterUrl = img
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        // =========================================
+        // FALLBACK HTML
+        // =========================================
+
+        if (results.isEmpty()) {
+
+            doc.select("a:has(img)").forEach { a ->
+
+                val link =
+                    a.attr("abs:href")
+                        .ifEmpty { a.attr("href") }
+
+                val imgElement =
+                    a.select("img").firstOrNull { img ->
+
+                        val src =
+                            img.attr("src").lowercase()
+
+                        !src.contains("paypal") &&
+                                !src.contains("donar") &&
+                                !src.contains("pago") &&
+                                !src.contains("qr") &&
+                                src.isNotEmpty()
+
+                    } ?: a.selectFirst("img")
+
+                val title =
+                    imgElement?.attr("alt")?.trim()
+                        ?: a.text().trim()
+
+                val poster =
+                    imgElement?.attr("abs:src")
+                        ?: imgElement?.attr("src")
+                        ?: ""
+
+                if (isValidChannel(link, title)) {
+
+                    results.add(
+                        newMovieSearchResponse(
+                            title,
+                            link,
+                            TvType.Live
+                        ) {
+                            this.posterUrl = poster
+                        }
+                    )
+                }
+            }
+        }
+
+        return results.distinctBy { it.url }
+    }
+
+    // =====================================================
+    // VALIDATE CHANNEL
+    // =====================================================
+
+    private fun isValidChannel(
+        link: String,
+        title: String
+    ): Boolean {
+
+        val cleanLink =
+            link.trim().removeSuffix("/")
+
+        val cleanBase =
+            mainUrl.removeSuffix("/")
+
+        return link.isNotEmpty() &&
+                title.isNotEmpty() &&
+                (link.startsWith(mainUrl) || !link.startsWith("http")) &&
+                cleanLink != cleanBase &&
+                !link.contains("linktre.online") &&
+                !link.contains("paypal.com") &&
+                !link.contains("/category/") &&
+                !link.contains("/tag/") &&
+                !title.contains("Telegram", true) &&
+                !title.contains("Soporte", true)
+    }
+
+    // =====================================================
+    // MAIN PAGE
+    // =====================================================
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+
+        val doc = app.get(request.data).document
+
+        val channels = parseChannels(doc)
+
+        return newHomePageResponse(
+            listOf(
+                HomePageList(
+                    "Canales",
+                    channels
+                )
+            ),
+            false
+        )
+    }
+
+    // =====================================================
+    // SEARCH
+    // =====================================================
+
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
+
+        return try {
+
+            val doc =
+                app.get("$mainUrl/?s=$query").document
+
+            parseChannels(doc)
+
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    // =====================================================
+    // LOAD
+    // =====================================================
+
+    override suspend fun load(
+        url: String
+    ): LoadResponse {
 
         val doc = app.get(url).document
 
-        val title = doc.selectFirst(
-            "h1, h2, .entry-title, .title"
-        )?.text()?.trim() ?: "Canal en Vivo"
+        val title =
+            doc.selectFirst(
+                "h1, h2, .title, .entry-title"
+            )?.text()
+                ?: "Canal en Vivo"
 
-        val poster = doc.selectFirst(
-            "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
-        )?.attr("abs:src")
-            ?.ifBlank {
-                doc.selectFirst(
-                    "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
-                )?.attr("src")
-            } ?: ""
+        val forbidden = listOf(
+            "paypal",
+            "pago",
+            "donar",
+            "pay.png",
+            "qr",
+            "cafecito",
+            "mercado",
+            "donate",
+            "buy",
+            "telegram",
+            "whatsapp",
+            "facebook",
+            "twitter",
+            "instagram",
+            "share",
+            "ads",
+            "banner",
+            "pixel",
+            "button",
+            "btn",
+            "favicon"
+        )
+
+        var imgElement =
+            doc.select(
+                "img.wp-post-image, img.attachment-post-thumbnail"
+            ).firstOrNull { img ->
+
+                val src =
+                    img.attr("src").lowercase()
+
+                forbidden.none { it in src }
+            }
+
+        if (imgElement == null) {
+
+            val titleKeywords =
+                title.lowercase()
+                    .split(" ")
+                    .filter { it.length > 3 }
+
+            imgElement =
+                doc.select(
+                    ".entry-content img, .post-content img, article img"
+                ).firstOrNull { img ->
+
+                    val alt =
+                        img.attr("alt").lowercase()
+
+                    val src =
+                        img.attr("src").lowercase()
+
+                    titleKeywords.any {
+                        it in alt || it in src
+                    } && forbidden.none { it in src }
+                }
+        }
+
+        if (imgElement == null) {
+
+            imgElement =
+                doc.select(
+                    ".entry-content img, .card-body img"
+                ).firstOrNull { img ->
+
+                    val src =
+                        img.attr("src").lowercase()
+
+                    forbidden.none { it in src } &&
+                            src.isNotEmpty()
+                }
+        }
+
+        val rawImg =
+            imgElement?.attr("abs:src")
+                ?.ifEmpty {
+                    imgElement?.attr("src")
+                } ?: ""
+
+        val poster =
+            if (rawImg.startsWith("http")) rawImg
+            else if (rawImg.isNotEmpty())
+                "$mainUrl/${rawImg.removePrefix("/")}"
+            else ""
 
         return newMovieLoadResponse(
             title,
@@ -47,15 +345,15 @@ class CablevisionHdProvider : MainAPI() {
             TvType.Live,
             url
         ) {
-            this.posterUrl = fixUrlNull(poster)
-            this.backgroundPosterUrl = fixUrlNull(poster)
-            this.plot = "Transmisión en vivo"
+            this.posterUrl = poster
+            this.backgroundPosterUrl = poster
+            this.plot = "Canal de TV por Internet en vivo."
         }
     }
 
-    // =========================================
+    // =====================================================
     // LOAD LINKS
-    // =========================================
+    // =====================================================
 
     override suspend fun loadLinks(
         data: String,
@@ -65,33 +363,27 @@ class CablevisionHdProvider : MainAPI() {
     ): Boolean {
 
         var currentUrl = data
-        var referer = mainUrl
-
-        val maxDepth = 6
+        var currentReferer = mainUrl
+        var depth = 0
 
         val patterns = listOf(
 
-            // DIRECT M3U8
             Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']"""),
 
-            // DIRECT MP4
-            Regex("""["'](https?://[^"']+\.mp4[^"']*)["']"""),
-
-            // PLAYER CONFIGS
             Regex("""source\s*:\s*["']([^"']+)["']"""),
-            Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']"""),
+
             Regex("""file\s*:\s*["']([^"']+)["']"""),
 
-            // VARIABLES
             Regex("""var\s+src\s*=\s*["']([^"']+)["']"""),
-            Regex("""src\s*:\s*["']([^"']+)["']"""),
 
-            // JSON
-            Regex(""""url"\s*:\s*"([^"]+)""""),
-            Regex(""""file"\s*:\s*"([^"]+)"""")
+            Regex("""["'](https?://[^"']+\.mp4[^"']*)["']"""),
+
+            Regex("""src\s*:\s*["']([^"']+)["']""")
         )
 
-        repeat(maxDepth) {
+        while (depth < 6) {
+
+            depth++
 
             try {
 
@@ -99,7 +391,7 @@ class CablevisionHdProvider : MainAPI() {
                     currentUrl,
                     headers = mapOf(
                         "User-Agent" to USER_AGENT,
-                        "Referer" to referer,
+                        "Referer" to currentReferer,
                         "Origin" to mainUrl
                     )
                 )
@@ -108,36 +400,28 @@ class CablevisionHdProvider : MainAPI() {
                 val document = response.document
 
                 // =========================================
-                // DIRECT SEARCH
+                // DIRECT PATTERNS
                 // =========================================
 
                 for (pattern in patterns) {
 
                     pattern.find(html)?.let { match ->
 
-                        val found = clean(match.groupValues[1])
+                        val foundUrl =
+                            clean(match.groupValues[1])
 
-                        if (
-                            found.startsWith("http") &&
-                            (
-                                    found.contains(".m3u8") ||
-                                            found.contains(".mp4") ||
-                                            found.contains("stream") ||
-                                            found.contains("playlist")
-                                    )
-                        ) {
+                        if (foundUrl.startsWith("http")) {
 
                             callback.invoke(
                                 newExtractorLink(
                                     source = name,
                                     name = name,
-                                    url = found,
+                                    url = foundUrl,
                                     type = INFER_TYPE
                                 ) {
                                     headers = mapOf(
-                                        "User-Agent" to USER_AGENT,
-                                        "Referer" to referer,
-                                        "Origin" to mainUrl
+                                        "Referer" to currentUrl,
+                                        "User-Agent" to USER_AGENT
                                     )
                                 }
                             )
@@ -151,187 +435,175 @@ class CablevisionHdProvider : MainAPI() {
                 // PACKED EVAL
                 // =========================================
 
-                Regex(
-                    """eval\(function\(p,a,c,k,e,[^)]*\).*?\)""",
-                    RegexOption.DOT_MATCHES_ALL
-                )
-                    .findAll(html)
-                    .forEach { match ->
+                document.select("script").forEach { script ->
 
-                        try {
+                    val scriptData = script.data()
 
-                            val unpacked =
-                                JsUnpacker(match.value).unpack() ?: return@forEach
+                    if (scriptData.contains("eval(function")) {
 
-                            for (pattern in patterns) {
+                        val unpacked =
+                            JsUnpacker(scriptData).unpack()
+                                ?: ""
 
-                                pattern.find(unpacked)?.let { result ->
+                        for (pattern in patterns) {
 
-                                    val found = clean(result.groupValues[1])
+                            pattern.find(unpacked)?.let { match ->
 
-                                    if (
-                                        found.startsWith("http") &&
-                                        (
-                                                found.contains(".m3u8") ||
-                                                        found.contains(".mp4")
-                                                )
-                                    ) {
+                                val foundUrl =
+                                    clean(match.groupValues[1])
 
-                                        callback.invoke(
-                                            newExtractorLink(
-                                                source = name,
-                                                name = name,
-                                                url = found,
-                                                type = INFER_TYPE
-                                            ) {
-                                                headers = mapOf(
-                                                    "User-Agent" to USER_AGENT,
-                                                    "Referer" to referer
-                                                )
-                                            }
-                                        )
+                                if (foundUrl.startsWith("http")) {
 
-                                        return true
-                                    }
+                                    callback.invoke(
+                                        newExtractorLink(
+                                            source = name,
+                                            name = name,
+                                            url = foundUrl,
+                                            type = INFER_TYPE
+                                        ) {
+                                            headers = mapOf(
+                                                "Referer" to currentUrl,
+                                                "User-Agent" to USER_AGENT
+                                            )
+                                        }
+                                    )
+
+                                    return true
                                 }
                             }
-
-                        } catch (_: Throwable) {
                         }
                     }
+                }
 
                 // =========================================
                 // BASE64 CASCADE
                 // =========================================
 
-                Regex("""atob\(["']([^"']+)["']\)""")
-                    .findAll(html)
-                    .forEach { match ->
+                if (
+                    html.contains("const decodedURL") ||
+                    html.contains("atob(")
+                ) {
 
-                        try {
+                    document.select("script").forEach { s ->
 
-                            var encoded = match.groupValues[1]
+                        val dataScript = s.data()
 
-                            repeat(6) {
+                        if (dataScript.contains("atob(")) {
 
-                                val decoded = try {
-                                    String(Base64.decode(encoded, Base64.DEFAULT))
-                                } catch (_: Throwable) {
-                                    return@repeat
-                                }
+                            try {
 
-                                // DIRECT STREAM
-                                if (
-                                    decoded.contains(".m3u8") ||
-                                    decoded.contains(".mp4")
-                                ) {
+                                val enc =
+                                    dataScript.substringAfter("atob(\"")
+                                        .substringBefore("\")")
 
-                                    val stream =
-                                        Regex("""https?://[^\s"'\\]+""")
-                                            .find(decoded)
-                                            ?.value
+                                var dec =
+                                    String(
+                                        Base64.decode(
+                                            enc,
+                                            Base64.DEFAULT
+                                        )
+                                    )
 
-                                    if (!stream.isNullOrBlank()) {
+                                repeat(3) {
 
-                                        callback.invoke(
-                                            newExtractorLink(
-                                                source = name,
-                                                name = name,
-                                                url = clean(stream),
-                                                type = INFER_TYPE
-                                            ) {
-                                                headers = mapOf(
-                                                    "User-Agent" to USER_AGENT,
-                                                    "Referer" to referer
-                                                )
-                                            }
+                                    if (dec.contains("atob(")) {
+
+                                        val innerEnc =
+                                            dec.substringAfter("atob(\"")
+                                                .substringBefore("\")")
+
+                                        dec = String(
+                                            Base64.decode(
+                                                innerEnc,
+                                                Base64.DEFAULT
+                                            )
                                         )
 
-                                        return true
+                                    } else if (!dec.startsWith("http")) {
+
+                                        try {
+
+                                            dec = String(
+                                                Base64.decode(
+                                                    dec,
+                                                    Base64.DEFAULT
+                                                )
+                                            )
+
+                                        } catch (_: Exception) {
+                                        }
                                     }
                                 }
 
-                                // NESTED ATOB
-                                if (decoded.contains("atob(")) {
+                                if (dec.startsWith("http")) {
 
-                                    val nested =
-                                        Regex("""atob\(["']([^"']+)["']\)""")
-                                            .find(decoded)
-                                            ?.groupValues
-                                            ?.getOrNull(1)
+                                    callback.invoke(
+                                        newExtractorLink(
+                                            source = name,
+                                            name = name,
+                                            url = clean(dec),
+                                            type = INFER_TYPE
+                                        ) {
+                                            headers = mapOf(
+                                                "Referer" to currentUrl,
+                                                "User-Agent" to USER_AGENT
+                                            )
+                                        }
+                                    )
 
-                                    if (!nested.isNullOrBlank()) {
-                                        encoded = nested
-                                        return@repeat
-                                    }
+                                    return true
                                 }
 
-                                encoded = decoded
+                            } catch (_: Exception) {
                             }
-
-                        } catch (_: Throwable) {
                         }
                     }
+                }
 
                 // =========================================
                 // IFRAME FOLLOW
                 // =========================================
 
-                val iframe =
-                    document.selectFirst("iframe[src]")?.attr("src")
-                        ?: document.selectFirst("iframe[data-src]")?.attr("data-src")
+                val iframes =
+                    document.select("iframe")
 
-                if (!iframe.isNullOrBlank()) {
-
-                    val nextUrl =
-                        if (iframe.startsWith("http")) iframe
-                        else fixUrl(iframe)
-
-                    if (
-                        nextUrl.isNotBlank() &&
-                        nextUrl != currentUrl
-                    ) {
-
-                        referer = currentUrl
-                        currentUrl = nextUrl
-
-                        return@repeat
-                    }
-                }
-
-                // =========================================
-                // EMBED SEARCH
-                // =========================================
-
-                val embed =
-                    Regex("""https?://[^\s"'\\]+(?:embed|player|stream)[^\s"'\\]*""")
-                        .find(html)
-                        ?.value
+                val nextIframe =
+                    iframes.firstOrNull {
+                        it.attr("src").isNotEmpty()
+                    }?.attr("src")
+                        ?: iframes.firstOrNull {
+                            it.attr("data-src").isNotEmpty()
+                        }?.attr("data-src")
+                        ?: ""
 
                 if (
-                    !embed.isNullOrBlank() &&
-                    embed != currentUrl
+                    nextIframe.isNotEmpty() &&
+                    nextIframe != currentUrl
                 ) {
 
-                    referer = currentUrl
-                    currentUrl = clean(embed)
+                    currentReferer = currentUrl
 
-                    return@repeat
+                    currentUrl =
+                        if (nextIframe.startsWith("http"))
+                            nextIframe
+                        else
+                            "$mainUrl/${nextIframe.removePrefix("/")}"
+
+                } else {
+                    break
                 }
 
-                return false
-
-            } catch (_: Throwable) {
-                return false
+            } catch (_: Exception) {
+                break
             }
         }
 
         return false
     }
 
-    // =========================================
-    // CLEAN URLS
-    // =========================================
+    // =====================================================
+    // CLEAN URL
+    // =====================================================
 
     private fun clean(raw: String): String {
 
