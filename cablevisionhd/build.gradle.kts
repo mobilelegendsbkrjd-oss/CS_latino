@@ -1,10 +1,5 @@
-// use an integer for version numbers
-<<<<<<< HEAD:cablevisionhd/build.gradle.kts
 version = 5
-=======
 version = 12
->>>>>>> upstream/master:Coflix/build.gradle.kts
-
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
