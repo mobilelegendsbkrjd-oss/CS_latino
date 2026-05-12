@@ -4,7 +4,6 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
-import java.util.regex.Pattern
 
 class CablevisionHdProvider : MainAPI() {
 
@@ -18,7 +17,7 @@ class CablevisionHdProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Live)
 
     private val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     // ================================
     // BASIC LOAD
@@ -27,18 +26,35 @@ class CablevisionHdProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        val title = doc.selectFirst("h1, h2")?.text() ?: "Canal en Vivo"
-        val poster = doc.selectFirst("img")?.attr("src") ?: ""
+        val title = doc.selectFirst("h1, h2, .entry-title, .title")
+            ?.text()
+            ?.trim()
+            ?: "Canal en Vivo"
 
-        return newMovieLoadResponse(title, url, TvType.Live, url) {
-            this.posterUrl = fixUrl(poster)
-            this.backgroundPosterUrl = fixUrl(poster)
+        val poster = doc.selectFirst(
+            "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
+        )?.attr("abs:src")
+            ?.ifBlank {
+                doc.selectFirst(
+                    "img.wp-post-image, img.attachment-post-thumbnail, article img, img"
+                )?.attr("src")
+            }
+            ?: ""
+
+        return newMovieLoadResponse(
+            title,
+            url,
+            TvType.Live,
+            url
+        ) {
+            this.posterUrl = fixUrlNull(poster)
+            this.backgroundPosterUrl = fixUrlNull(poster)
             this.plot = "Transmisión en vivo"
         }
     }
 
     // ================================
-    // DEX STYLE LOADLINKS
+    // MODERN LOADLINKS
     // ================================
 
     override suspend fun loadLinks(
@@ -53,113 +69,279 @@ class CablevisionHdProvider : MainAPI() {
 
         val maxDepth = 6
 
-        repeat(maxDepth) { depth ->
+        val patterns = listOf(
 
-            val response = app.get(
-                currentUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to referer,
-                    "Origin" to mainUrl
-                )
-            )
+            // DIRECT M3U8
+            Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']"""),
 
-            val html = response.text
-            val document = response.document
+            // DIRECT MP4
+            Regex("""["'](https?://[^"']+\.mp4[^"']*)["']"""),
 
-            // 1️⃣ DIRECT M3U8
-            Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
-                .find(html)
-                ?.groupValues?.getOrNull(1)
-                ?.let { url ->
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            name,
-                            clean(url),
-                            mainUrl,
-                            Qualities.getQualityFromName("HD"),
-                            isM3u8 = true,
-                            headers = mapOf(
-                                "User-Agent" to USER_AGENT,
-                                "Referer" to referer
-                            )
-                        )
+            // JWPLAYER / PLAYER CONFIGS
+            Regex("""source\s*:\s*["']([^"']+)["']"""),
+            Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']"""),
+            Regex("""file\s*:\s*["']([^"']+)["']"""),
+
+            // VARIABLES
+            Regex("""var\s+src\s*=\s*["']([^"']+)["']"""),
+            Regex("""src\s*:\s*["']([^"']+)["']"""),
+
+            // JSON STYLE
+            Regex(""""url"\s*:\s*"([^"]+)""""),
+            Regex(""""file"\s*:\s*"([^"]+)"""")
+        )
+
+        repeat(maxDepth) {
+
+            try {
+
+                val response = app.get(
+                    currentUrl,
+                    headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to referer,
+                        "Origin" to mainUrl
                     )
-                    return true
-                }
+                )
 
-            // 2️⃣ PACKED EVAL
-            Regex("""eval\(function\(p,a,c,k,e,[^)]*\).*?\)""", RegexOption.DOT_MATCHES_ALL)
-                .findAll(html)
-                .forEach { match ->
+                val html = response.text
+                val document = response.document
 
-                    val unpacked = JsUnpacker(match.value).unpack() ?: return@forEach
+                // ================================
+                // DIRECT PATTERN SEARCH
+                // ================================
 
-                    Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
-                        .find(unpacked)
-                        ?.groupValues?.getOrNull(1)
-                        ?.let { url ->
+                for (pattern in patterns) {
+
+                    pattern.find(html)?.let { match ->
+
+                        val found = clean(match.groupValues[1])
+
+                        if (
+                            found.startsWith("http") &&
+                            (
+                                    found.contains(".m3u8") ||
+                                            found.contains(".mp4") ||
+                                            found.contains("stream") ||
+                                            found.contains("playlist")
+                                    )
+                        ) {
+
                             callback.invoke(
                                 ExtractorLink(
                                     name,
                                     name,
-                                    clean(url),
-                                    mainUrl,
+                                    found,
+                                    referer,
                                     Qualities.getQualityFromName("HD"),
-                                    isM3u8 = true
-                                )
-                            )
-                            return true
-                        }
-                }
-
-            // 3️⃣ BASE64 CASCADE
-            Regex("""atob\(["']([^"']+)["']\)""")
-                .findAll(html)
-                .forEach { match ->
-                    try {
-                        var encoded = match.groupValues[1]
-                        repeat(4) {
-                            val decoded = String(Base64.decode(encoded, Base64.DEFAULT))
-                            if (decoded.contains(".m3u8")) {
-                                callback.invoke(
-                                    ExtractorLink(
-                                        name,
-                                        name,
-                                        clean(decoded),
-                                        mainUrl,
-                                        Qualities.getQualityFromName("HD"),
-                                        isM3u8 = true
+                                    isM3u8 = found.contains(".m3u8"),
+                                    headers = mapOf(
+                                        "User-Agent" to USER_AGENT,
+                                        "Referer" to referer,
+                                        "Origin" to mainUrl
                                     )
                                 )
-                                return true
-                            }
-                            encoded = decoded
+                            )
+
+                            return true
                         }
-                    } catch (_: Throwable) {}
+                    }
                 }
 
-            // 4️⃣ IFRAME FOLLOW
-            val iframe = document.selectFirst("iframe")?.attr("src")
-            if (!iframe.isNullOrBlank()) {
-                val nextUrl = if (iframe.startsWith("http")) iframe else fixUrl(iframe)
-                if (nextUrl != currentUrl) {
+                // ================================
+                // PACKED EVAL
+                // ================================
+
+                Regex(
+                    """eval\(function\(p,a,c,k,e,[^)]*\).*?\)""",
+                    RegexOption.DOT_MATCHES_ALL
+                )
+                    .findAll(html)
+                    .forEach { match ->
+
+                        try {
+
+                            val unpacked =
+                                JsUnpacker(match.value).unpack() ?: return@forEach
+
+                            for (pattern in patterns) {
+
+                                pattern.find(unpacked)?.let { result ->
+
+                                    val found = clean(result.groupValues[1])
+
+                                    if (
+                                        found.startsWith("http") &&
+                                        (
+                                                found.contains(".m3u8") ||
+                                                        found.contains(".mp4")
+                                                )
+                                    ) {
+
+                                        callback.invoke(
+                                            ExtractorLink(
+                                                name,
+                                                name,
+                                                found,
+                                                referer,
+                                                Qualities.getQualityFromName("HD"),
+                                                isM3u8 = found.contains(".m3u8"),
+                                                headers = mapOf(
+                                                    "User-Agent" to USER_AGENT,
+                                                    "Referer" to referer
+                                                )
+                                            )
+                                        )
+
+                                        return true
+                                    }
+                                }
+                            }
+
+                        } catch (_: Throwable) {
+                        }
+                    }
+
+                // ================================
+                // BASE64 CASCADE
+                // ================================
+
+                Regex("""atob\(["']([^"']+)["']\)""")
+                    .findAll(html)
+                    .forEach { match ->
+
+                        try {
+
+                            var encoded = match.groupValues[1]
+
+                            repeat(6) {
+
+                                val decoded = try {
+                                    String(Base64.decode(encoded, Base64.DEFAULT))
+                                } catch (_: Throwable) {
+                                    return@repeat
+                                }
+
+                                // DIRECT URL
+                                if (
+                                    decoded.contains(".m3u8") ||
+                                    decoded.contains(".mp4")
+                                ) {
+
+                                    val stream =
+                                        Regex("""https?://[^\s"'\\]+""")
+                                            .find(decoded)
+                                            ?.value
+
+                                    if (!stream.isNullOrBlank()) {
+
+                                        callback.invoke(
+                                            ExtractorLink(
+                                                name,
+                                                name,
+                                                clean(stream),
+                                                referer,
+                                                Qualities.getQualityFromName("HD"),
+                                                isM3u8 = stream.contains(".m3u8"),
+                                                headers = mapOf(
+                                                    "User-Agent" to USER_AGENT,
+                                                    "Referer" to referer
+                                                )
+                                            )
+                                        )
+
+                                        return true
+                                    }
+                                }
+
+                                // NESTED ATOB
+                                if (decoded.contains("atob(")) {
+
+                                    val nested =
+                                        Regex("""atob\(["']([^"']+)["']\)""")
+                                            .find(decoded)
+                                            ?.groupValues
+                                            ?.getOrNull(1)
+
+                                    if (!nested.isNullOrBlank()) {
+                                        encoded = nested
+                                        return@repeat
+                                    }
+                                }
+
+                                encoded = decoded
+                            }
+
+                        } catch (_: Throwable) {
+                        }
+                    }
+
+                // ================================
+                // IFRAME FOLLOW
+                // ================================
+
+                val iframe =
+                    document.selectFirst("iframe[src]")?.attr("src")
+                        ?: document.selectFirst("iframe[data-src]")?.attr("data-src")
+
+                if (!iframe.isNullOrBlank()) {
+
+                    val nextUrl =
+                        if (iframe.startsWith("http")) iframe
+                        else fixUrl(iframe)
+
+                    if (
+                        nextUrl.isNotBlank() &&
+                        nextUrl != currentUrl
+                    ) {
+
+                        referer = currentUrl
+                        currentUrl = nextUrl
+
+                        return@repeat
+                    }
+                }
+
+                // ================================
+                // EMBED SEARCH
+                // ================================
+
+                val embed =
+                    Regex("""https?://[^\s"'\\]+(?:embed|player|stream)[^\s"'\\]*""")
+                        .find(html)
+                        ?.value
+
+                if (
+                    !embed.isNullOrBlank() &&
+                    embed != currentUrl
+                ) {
+
                     referer = currentUrl
-                    currentUrl = nextUrl
+                    currentUrl = clean(embed)
+
                     return@repeat
                 }
-            }
 
-            return false
+                return false
+
+            } catch (_: Throwable) {
+                return false
+            }
         }
 
         return false
     }
 
+    // ================================
+    // CLEAN URLS
+    // ================================
+
     private fun clean(raw: String): String {
-        return raw.replace("\\/", "/")
+        return raw
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
             .replace("\\\"", "")
+            .replace("&amp;", "&")
             .trim('"', '\'', ' ')
     }
 }
