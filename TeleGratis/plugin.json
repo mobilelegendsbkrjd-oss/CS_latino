@@ -1,0 +1,12 @@
+{
+  "name": "Tele Gratis HD",
+  "id": "telegratishd",
+  "version": "1",
+  "versionCode": 1,
+  "description": "Televisión gratuita en HD - Más de 100 canales en vivo",
+  "author": "TuNombre",
+  "website": "https://www.telegratishd.com",
+  "language": "es",
+  "categories": ["Live"],
+  "icon": "https://www.telegratishd.com/favicon.ico"
+}
