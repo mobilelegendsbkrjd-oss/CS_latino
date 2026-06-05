@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 2
+version = 5
 
 
 cloudstream {
@@ -22,7 +22,7 @@ cloudstream {
     // You can find a list of available types here:
     // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
     tvTypes = listOf("Movie","Anime","AnimeMovie")
-    iconUrl = "https://latanime.org/public/img/logito.png"
+    iconUrl = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/animeav1.png"
 
     isCrossPlatform = false
 }
