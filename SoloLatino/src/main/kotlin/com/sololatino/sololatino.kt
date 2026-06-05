@@ -14,8 +14,9 @@ class SoloLatino : MainAPI() {
     override var mainUrl = "https://sololatino.net"
     override var name = "SoloLatino"
     override val hasMainPage = true
-    override var lang = "es"
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override var lang = "mx"
+    // CAMBIO 1: Agregar tipos de Anime (COMPATIBLE)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AnimeMovie)
 
     // ====================== DATA CLASSES ======================
     data class Item(
@@ -53,12 +54,26 @@ class SoloLatino : MainAPI() {
                 it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
             }?.replace(Regex("-\\d+x\\d+"), "")
 
+            // CAMBIO 2: Detectar anime (COMPATIBLE)
             val isMovie = absoluteUrl.contains("/pelicula/")
+            val isAnime = absoluteUrl.contains("/anime/") || absoluteUrl.contains("/animes/")
 
-            if (isMovie) {
-                newMovieSearchResponse(title, absoluteUrl, TvType.Movie) { this.posterUrl = poster }
-            } else {
-                newTvSeriesSearchResponse(title, absoluteUrl, TvType.TvSeries) { this.posterUrl = poster }
+            when {
+                isAnime -> {
+                    newAnimeSearchResponse(title, absoluteUrl, TvType.Anime) {
+                        this.posterUrl = poster
+                    }
+                }
+                isMovie -> {
+                    newMovieSearchResponse(title, absoluteUrl, TvType.Movie) {
+                        this.posterUrl = poster
+                    }
+                }
+                else -> {
+                    newTvSeriesSearchResponse(title, absoluteUrl, TvType.TvSeries) {
+                        this.posterUrl = poster
+                    }
+                }
             }
         }
     }
@@ -85,72 +100,72 @@ class SoloLatino : MainAPI() {
         } catch (_: Exception) { null }
     }
 
-        // ====================== HELPER PARA CATEGORÍAS CON SCROLL INFINITO ======================
-private suspend fun getCategoryInfinite(title: String, baseUrl: String): HomePageList {
-    val allItems = mutableListOf<SearchResponse>()
-    
-    // Cargar múltiples páginas hasta tener suficientes items
-    var currentPage = 1
-    var hasMore = true
-    
-    while (hasMore && currentPage <= 10) { // Límite de 10 páginas
-        try {
-            val url = if (currentPage == 1) baseUrl else "$baseUrl&page=$currentPage"
-            
-            // Añadir headers específicos para evitar 403
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8",
-                "Referer" to mainUrl
-            )
-            
-            val doc = app.get(url, headers = headers).document
-            val items = parseCards(doc)
-            
-            if (items.isEmpty()) {
+    // ====================== HELPER PARA CATEGORÍAS CON SCROLL INFINITO ======================
+    private suspend fun getCategoryInfinite(title: String, baseUrl: String): HomePageList {
+        val allItems = mutableListOf<SearchResponse>()
+
+        // Cargar múltiples páginas hasta tener suficientes items
+        var currentPage = 1
+        var hasMore = true
+
+        while (hasMore && currentPage <= 10) { // Límite de 10 páginas
+            try {
+                val url = if (currentPage == 1) baseUrl else "$baseUrl&page=$currentPage"
+
+                // Añadir headers específicos para evitar 403
+                val headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8",
+                    "Referer" to mainUrl
+                )
+
+                val doc = app.get(url, headers = headers).document
+                val items = parseCards(doc)
+
+                if (items.isEmpty()) {
+                    hasMore = false
+                    Log.e(name, "No items found in page $currentPage for $title")
+                } else {
+                    allItems.addAll(items)
+                    Log.e(name, "Loaded ${items.size} items from page $currentPage for $title (total: ${allItems.size})")
+                    currentPage++
+                }
+            } catch (e: Exception) {
+                Log.e(name, "Error loading page $currentPage for $title: ${e.message}")
                 hasMore = false
-                Log.e(name, "No items found in page $currentPage for $title")
-            } else {
-                allItems.addAll(items)
-                Log.e(name, "Loaded ${items.size} items from page $currentPage for $title (total: ${allItems.size})")
-                currentPage++
             }
-        } catch (e: Exception) {
-            Log.e(name, "Error loading page $currentPage for $title: ${e.message}")
-            hasMore = false
         }
+
+        // Invertir el orden para que el scroll D-pad funcione correctamente
+        return HomePageList(title, allItems.distinctBy { it.url }.reversed())
     }
-    
-    // Invertir el orden para que el scroll D-pad funcione correctamente
-    return HomePageList(title, allItems.distinctBy { it.url }.reversed())
-}
 
     // ====================== MAIN PAGE ======================
-override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-    val lists = mutableListOf<HomePageList>()
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val lists = mutableListOf<HomePageList>()
 
-    // Sagas (estático, sin scroll infinito)
-    val sagas = getSagas()
-    if (sagas.isNotEmpty()) {
-        lists.add(HomePageList("🔥 Sagas", sagas.take(20)))
+        // Sagas (estático, sin scroll infinito)
+        val sagas = getSagas()
+        if (sagas.isNotEmpty()) {
+            lists.add(HomePageList("🔥 Sagas", sagas.take(20)))
+        }
+
+        // Categorías con scroll infinito (carga múltiples páginas automáticamente)
+        lists.add(getCategoryInfinite("🎬 Películas Recientes", "$mainUrl/peliculas?año=0&nota=0&sort=updated"))
+        lists.add(getCategoryInfinite("📺 Series Recientes", "$mainUrl/series?año=0&nota=0&sort=updated"))
+        lists.add(getCategoryInfinite("🌸 Animes", "$mainUrl/animes?año=0&nota=0&sort=updated"))
+
+        // Plataformas con scroll infinito
+        lists.add(getCategoryInfinite("🌐 Netflix", "$mainUrl/red/netflix?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("📼 Prime Video", "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🍎 Apple TV", "$mainUrl/red/apple-tv?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🐭 Disney+", "$mainUrl/red/disney?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("📡 TVTokyo", "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("📡 Tokyo MX", "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes"))
+
+        return newHomePageResponse(lists)
     }
-
-    // Categorías con scroll infinito (carga múltiples páginas automáticamente)
-    lists.add(getCategoryInfinite("🎬 Películas Recientes", "$mainUrl/peliculas?año=0&nota=0&sort=updated"))
-    lists.add(getCategoryInfinite("📺 Series Recientes", "$mainUrl/series?año=0&nota=0&sort=updated"))
-    lists.add(getCategoryInfinite("🌸 Animes", "$mainUrl/animes?año=0&nota=0&sort=updated"))
-
-    // Plataformas con scroll infinito
-    lists.add(getCategoryInfinite("🌐 Netflix", "$mainUrl/red/netflix?año=0&nota=0&orden=recientes"))
-    lists.add(getCategoryInfinite("📼 Prime Video", "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes"))
-    lists.add(getCategoryInfinite("🍎 Apple TV", "$mainUrl/red/apple-tv?año=0&nota=0&orden=recientes"))
-    lists.add(getCategoryInfinite("🐭 Disney+", "$mainUrl/red/disney?año=0&nota=0&orden=recientes"))
-    lists.add(getCategoryInfinite("📡 TVTokyo", "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes"))
-    lists.add(getCategoryInfinite("📡 Tokyo MX", "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes"))
-
-    return newHomePageResponse(lists)
-}
 
     // ====================== SEARCH ======================
     override suspend fun search(query: String): List<SearchResponse> {
@@ -206,17 +221,13 @@ override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageR
         }
 
         val doc = app.get(url).document
+        // CAMBIO 3: Detectar anime (COMPATIBLE)
+        val isAnime = url.contains("/anime/") || url.contains("/animes/")
         val isSeries = url.contains("/serie/")
+
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore("|")?.trim() ?: "Sin título"
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst("meta[name=description]")?.attr("content") ?: ""
-
-        if (!isSeries) {
-            return newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot = plot
-            }
-        }
 
         val episodes = mutableListOf<Episode>()
         doc.select("a.ep-item").forEach { ep ->
@@ -237,13 +248,41 @@ override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageR
             })
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes.sortedWith(compareBy({ it.season }, { it.episode }))) {
+        // CAMBIO 4: Anime (COMPATIBLE)
+        if (isAnime) {
+            // Película de anime (1 episodio o sin episodios)
+            if (episodes.size <= 1 && !isSeries) {
+                val movieUrl = episodes.firstOrNull()?.data ?: url
+                return newMovieLoadResponse(title, url, TvType.AnimeMovie, movieUrl) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                }
+            }
+
+            // Serie de anime
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster
+                this.plot = plot
+                addEpisodes(DubStatus.Dubbed, episodes.sortedWith(compareBy({ it.season }, { it.episode })))
+            }
+        }
+
+        // Series normales
+        if (isSeries) {
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes.sortedWith(compareBy({ it.season }, { it.episode }))) {
+                this.posterUrl = poster
+                this.plot = plot
+            }
+        }
+
+        // Películas normales
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = plot
         }
     }
 
-    // ====================== LOAD LINKS (CORREGIDO) ======================
+    // ====================== LOAD LINKS ======================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,

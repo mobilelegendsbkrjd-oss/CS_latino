@@ -99,6 +99,7 @@ class Latanime : MainAPI() {
                 this.tags = tags
                 this.year = year
                 this.recommendations = recommendations
+				
                 if (rawTitle.contains("latino", true) || rawTitle.contains("castellano", true)) {
                     addEpisodes(DubStatus.Dubbed, finalEpisodes)
                 } else {
