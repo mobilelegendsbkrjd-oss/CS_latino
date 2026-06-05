@@ -118,8 +118,7 @@ class Latanime : MainAPI() {
         }
     }
     
-    // ==================== LOAD LINKS TOTALMENTE REPARADO ====================
-            override suspend fun loadLinks(
+    override suspend fun loadLinks(
     data: String,
     isCasting: Boolean,
     subtitleCallback: (SubtitleFile) -> Unit,
@@ -134,32 +133,21 @@ class Latanime : MainAPI() {
         )
     ).document
 
-    // =========================
-    // DATA-KEY REAL
-    // =========================
     val dataKey = document
         .selectFirst(".player")
         ?.attr("data-key")
         ?.trim()
         ?: ""
 
-    val servers = document.select(
-        "a.repro-item[data-player]"
-    )
-
-    if (servers.isEmpty()) {
-        return false
-    }
-
     var found = false
+
+    val servers = document.select(
+        "a[data-player], ul.cap_repro li a"
+    )
 
     servers.forEach { server ->
 
         try {
-
-            val serverName = server.text()
-                .trim()
-                .lowercase()
 
             val encoded = server
                 .attr("data-player")
@@ -169,89 +157,188 @@ class Latanime : MainAPI() {
                 return@forEach
             }
 
-            // =========================
-            // YOURUPLOAD
-            // =========================
-            val finalEncoded = if (
-                serverName.contains("yourupload")
-            ) {
-                encoded
-            } else {
-                dataKey + encoded
-            }
+            val serverName = server.text()
+                .trim()
+                .lowercase()
 
-            // =========================
-            // BASE64
-            // =========================
-            val decoded = try {
+            // ===================================================
+            // NUEVO MÉTODO LATANIME
+            // /reproductor?url=
+            // ===================================================
+            var resolvedUrl: String? = null
 
-                String(
-                    Base64.decode(
-                        finalEncoded,
-                        Base64.DEFAULT
+            runCatching {
+
+                val repUrl =
+                    "$mainUrl/reproductor?url=$encoded"
+
+                resolvedUrl = app.get(
+                    repUrl,
+                    headers = mapOf(
+                        "Referer" to data,
+                        "User-Agent" to USER_AGENT
                     )
-                ).trim()
+                ).document
+                    .selectFirst("iframe, embed")
+                    ?.attr("src")
 
-            } catch (_: Exception) {
+            }
 
+            // ===================================================
+            // MÉTODO VIEJO DATA-KEY + BASE64
+            // ===================================================
+            if (resolvedUrl.isNullOrBlank()) {
+
+                val finalEncoded =
+                    if (serverName.contains("yourupload")) {
+                        encoded
+                    } else {
+                        dataKey + encoded
+                    }
+
+                resolvedUrl = runCatching {
+                    String(
+                        Base64.decode(
+                            finalEncoded,
+                            Base64.DEFAULT
+                        )
+                    ).trim()
+                }.getOrNull()
+            }
+
+            if (resolvedUrl.isNullOrBlank()) {
                 return@forEach
             }
 
-            if (!decoded.startsWith("http")) {
-                return@forEach
-            }
+            resolvedUrl = fixUrl(resolvedUrl!!)
 
-            println("LATANIME -> $serverName")
-            println("LATANIME URL -> $decoded")
-
-            // =========================
-            // MP4UPLOAD FIX
-            // =========================
-            val fixedUrl = when {
-
-                decoded.contains(
+            // ===================================================
+            // MP4UPLOAD
+            // ===================================================
+            if (
+                resolvedUrl!!.contains(
                     "mp4upload",
                     true
-                ) -> {
+                )
+            ) {
 
-                    val id = Regex(
-                        """(?:embed-|/)([A-Za-z0-9]+)"""
-                    ).find(decoded)
-                        ?.groupValues
-                        ?.getOrNull(1)
+                val id = Regex(
+                    """(?:embed-|/)([A-Za-z0-9]+)"""
+                ).find(resolvedUrl!!)
+                    ?.groupValues
+                    ?.getOrNull(1)
 
-                    if (id != null) {
+                if (id != null) {
+                    resolvedUrl =
                         "https://www.mp4upload.com/embed-$id.html"
-                    } else {
-                        decoded
-                    }
                 }
-
-                else -> decoded
             }
 
-            // =========================
-            // LOAD EXTRACTOR
-            // =========================
+            // ===================================================
+            // PIXELDRAIN
+            // ===================================================
+            if (
+                resolvedUrl!!.contains(
+                    "pixeldrain.com",
+                    true
+                )
+            ) {
+
+                val id = resolvedUrl!!
+                    .substringAfterLast("/")
+                    .trim()
+
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "Pixeldrain",
+                        url = "https://pixeldrain.com/api/file/$id?download",
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = data
+                        quality = Qualities.Unknown.value
+                    }
+                )
+
+                found = true
+                return@forEach
+            }
+
             loadExtractor(
-                fixedUrl,
+                resolvedUrl!!,
                 data,
-                subtitleCallback,
-                callback = { link ->
+                subtitleCallback
+            ) { link ->
+
+                found = true
+
+                callback.invoke(link)
+            }
+
+        } catch (e: Exception) {
+            println("LATANIME SERVER ERROR -> ${e.message}")
+        }
+    }
+
+    // ===================================================
+    // LINKS DE DESCARGA
+    // ===================================================
+    document.select(
+        "div.descarga2 div a"
+    ).forEach { dl ->
+
+        try {
+
+            val url = dl
+                .attr("href")
+                .trim()
+
+            if (url.isBlank()) {
+                return@forEach
+            }
+
+            val fixedUrl = fixUrl(url)
+
+            if (
+                fixedUrl.contains(
+                    "pixeldrain.com",
+                    true
+                )
+            ) {
+
+                val id = fixedUrl
+                    .substringAfterLast("/")
+                    .trim()
+
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "Pixeldrain",
+                        url = "https://pixeldrain.com/api/file/$id?download",
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = data
+                        quality = Qualities.Unknown.value
+                    }
+                )
+
+                found = true
+
+            } else {
+
+                loadExtractor(
+                    fixedUrl,
+                    data,
+                    subtitleCallback
+                ) { link ->
 
                     found = true
 
-                    callback.invoke(
-                        link
-                    )
+                    callback.invoke(link)
                 }
-            )
+            }
 
-        } catch (e: Exception) {
-
-            println(
-                "LATANIME ERROR -> ${e.message}"
-            )
+        } catch (_: Exception) {
         }
     }
 
