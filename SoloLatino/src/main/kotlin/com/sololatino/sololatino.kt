@@ -15,13 +15,8 @@ class SoloLatino : MainAPI() {
     override var name = "SoloLatino"
     override val hasMainPage = true
     override var lang = "mx"
+    // CAMBIO 1: Agregar tipos de Anime (COMPATIBLE)
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AnimeMovie)
-
-    // Cache para evitar consultas repetidas a TMDB
-    private val animeCache = mutableMapOf<String, Boolean>()
-
-    // Tu token de TMDB (debes obtener uno en https://www.themoviedb.org/settings/api)
-    private val tmdbToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI2MGE4ZTIxNzY4NTZhMDUwMjRhZDkzYzQwMWU3MDk5MiIsInN1YiI6IjYwNDU0ZmNjZDhlMjI1MDA0NTUyZjg5OCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.0eT2aN1gqiaZADmuf158U4fTJfS1jbQtD96g_kEbNhk" // Reemplaza con tu token real
 
     // ====================== DATA CLASSES ======================
     data class Item(
@@ -48,63 +43,6 @@ class SoloLatino : MainAPI() {
 
     private val sagasJson = "https://raw.githubusercontent.com/mobilelegendsbkrjd-oss/lat_cs_bkrjd/main/sagas.json"
 
-    // ====================== FUNCIÓN TMDB ======================
-    private suspend fun isAnimeByTmdb(title: String, poster: String?): Boolean {
-        // Verificar cache primero
-        animeCache[title]?.let { return it }
-
-        return try {
-            // Limpiar el título para la búsqueda
-            val cleanTitle = title
-                .substringBefore(" - ")
-                .substringBefore(" T")
-                .substringBefore(" (")
-                .replace(":", "")
-                .trim()
-
-            // Usar java.net.URLEncoder en lugar de urlEncode()
-            val encodedTitle = java.net.URLEncoder.encode(cleanTitle, "UTF-8")
-
-            val url = "https://api.themoviedb.org/3/search/tv?query=$encodedTitle&language=es-MX"
-
-            val response = app.get(
-                url,
-                headers = mapOf(
-                    "Authorization" to "Bearer $tmdbToken",
-                    "Accept" to "application/json"
-                )
-            )
-
-            val json = JSONObject(response.text)
-            val results = json.optJSONArray("results")
-
-            var isAnime = false
-
-            if (results != null && results.length() > 0) {
-                val firstResult = results.getJSONObject(0)
-                val genres = firstResult.optJSONArray("genre_ids")
-
-                if (genres != null) {
-                    for (i in 0 until genres.length()) {
-                        if (genres.getInt(i) == 16) { // 16 = Animation genre ID
-                            isAnime = true
-                            break
-                        }
-                    }
-                }
-            }
-
-            // Guardar en cache
-            animeCache[title] = isAnime
-            Log.d(name, "TMDB check for '$title': isAnime=$isAnime")
-            isAnime
-
-        } catch (e: Exception) {
-            Log.e(name, "Error checking TMDB for '$title': ${e.message}")
-            false
-        }
-    }
-
     // ====================== PARSE CARDS ======================
     private fun parseCards(element: org.jsoup.nodes.Element): List<SearchResponse> {
         return element.select(".card, article.card").mapNotNull { card ->
@@ -116,12 +54,12 @@ class SoloLatino : MainAPI() {
                 it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
             }?.replace(Regex("-\\d+x\\d+"), "")
 
-            // Detección inicial por URL
+            // CAMBIO 2: Detectar anime (COMPATIBLE)
             val isMovie = absoluteUrl.contains("/pelicula/")
-            val isAnimeUrl = absoluteUrl.contains("/anime/") || absoluteUrl.contains("/animes/")
+            val isAnime = absoluteUrl.contains("/anime/") || absoluteUrl.contains("/animes/")
 
             when {
-                isAnimeUrl -> {
+                isAnime -> {
                     newAnimeSearchResponse(title, absoluteUrl, TvType.Anime) {
                         this.posterUrl = poster
                     }
@@ -166,13 +104,15 @@ class SoloLatino : MainAPI() {
     private suspend fun getCategoryInfinite(title: String, baseUrl: String): HomePageList {
         val allItems = mutableListOf<SearchResponse>()
 
+        // Cargar múltiples páginas hasta tener suficientes items
         var currentPage = 1
         var hasMore = true
 
-        while (hasMore && currentPage <= 10) {
+        while (hasMore && currentPage <= 10) { // Límite de 10 páginas
             try {
                 val url = if (currentPage == 1) baseUrl else "$baseUrl&page=$currentPage"
 
+                // Añadir headers específicos para evitar 403
                 val headers = mapOf(
                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -197,6 +137,7 @@ class SoloLatino : MainAPI() {
             }
         }
 
+        // Invertir el orden para que el scroll D-pad funcione correctamente
         return HomePageList(title, allItems.distinctBy { it.url }.reversed())
     }
 
@@ -204,21 +145,24 @@ class SoloLatino : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = mutableListOf<HomePageList>()
 
+        // Sagas (estático, sin scroll infinito)
         val sagas = getSagas()
         if (sagas.isNotEmpty()) {
             lists.add(HomePageList("🔥 Sagas", sagas.take(20)))
         }
 
+        // Categorías con scroll infinito (carga múltiples páginas automáticamente)
         lists.add(getCategoryInfinite("🎬 Películas Recientes", "$mainUrl/peliculas?año=0&nota=0&sort=updated"))
         lists.add(getCategoryInfinite("📺 Series Recientes", "$mainUrl/series?año=0&nota=0&sort=updated"))
-        lists.add(getCategoryInfinite("🌸 Animes", "$mainUrl/animes?año=0&nota=0&sort=updated"))
 
-        lists.add(getCategoryInfinite("🌐 Netflix", "$mainUrl/red/netflix?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("📼 Prime Video", "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes"))
+// Plataformas con scroll infinito (Estilo Premium / Brand-Matched)
+        lists.add(getCategoryInfinite("🔴 Netflix", "$mainUrl/red/netflix?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🔵 Prime Video", "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes"))
         lists.add(getCategoryInfinite("🍎 Apple TV", "$mainUrl/red/apple-tv?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🐭 Disney+", "$mainUrl/red/disney?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("📡 TVTokyo", "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("📡 Tokyo MX", "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🏰 DisneyPlus", "$mainUrl/red/disney?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🏮 TVTokyo", "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("🗼 TokyoMX", "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes"))
+        lists.add(getCategoryInfinite("⛩️ Anime", "$mainUrl/animes?año=0&nota=0&sort=updated"))
 
         return newHomePageResponse(lists)
     }
@@ -278,7 +222,7 @@ class SoloLatino : MainAPI() {
 
         val doc = app.get(url).document
 
-        // Detección inicial por URL
+        // 🔥 CAMBIO 1: Usar var en lugar de val
         var isAnime = url.contains("/anime/") || url.contains("/animes/")
         val isSeries = url.contains("/serie/")
 
@@ -286,10 +230,17 @@ class SoloLatino : MainAPI() {
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst("meta[name=description]")?.attr("content") ?: ""
 
-        // Si no es anime por URL pero es una serie, consultar TMDB
-        if (!isAnime && isSeries) {
-            isAnime = isAnimeByTmdb(title, poster)
-            Log.d(name, "TMDB override for '$title': isAnime=$isAnime")
+        // 🔥 CAMBIO 2: Detectar anime por badge ANTES de procesar episodios
+        if (isSeries && !isAnime) {
+            val hasAnimeBadge = doc.selectFirst(".badge-anime") != null
+            val hasAnimeText = doc.select(".detail-field span").any { it.text().equals("anime", ignoreCase = true) }
+            val hasAnimeTag = doc.select(".tags a").any { it.text().contains("anime", ignoreCase = true) }
+
+            isAnime = hasAnimeBadge || hasAnimeText || hasAnimeTag
+
+            if (isAnime) {
+                Log.d(name, "✅ Detectado anime por badge/tag: $title")
+            }
         }
 
         val episodes = mutableListOf<Episode>()
@@ -311,7 +262,7 @@ class SoloLatino : MainAPI() {
             })
         }
 
-        // Priorizar la detección de TMDB sobre la URL
+        // Anime (detectado por URL o por badge)
         if (isAnime) {
             // Película de anime (1 episodio o sin episodios)
             if (episodes.size <= 1 && !isSeries) {
@@ -439,6 +390,7 @@ class SoloLatino : MainAPI() {
                 loadExtractor(it, referer, subtitleCallback, callback)
             }
 
+            // Extractores premium
             try {
                 if (iframeUrl.contains("embed69") || iframeUrl.contains("pelisserieshoy")) {
                     Embed69Extractor.load(iframeUrl, referer, subtitleCallback, callback)
