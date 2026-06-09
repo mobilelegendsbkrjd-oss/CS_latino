@@ -19,7 +19,7 @@ class Latanime : MainAPI() {
     override val mainPage = mainPageOf(
         "animes?fecha=false&genero=false&letra=false&categoria=latino" to "Anime Latino",
         "animes?fecha=false&genero=false&letra=false&categoria=anime" to "Anime",
-        "animes?fecha=false&genero=false&letra=false&categoria=cartoon" to "Cartoons",
+        "animes?fecha=false&genero=false&letra=false&categoria=Cartoon" to "Cartoons",
         "animes?fecha=false&genero=false&letra=false&categoria=Película%20Latino" to "Película Latino",
         "animes?fecha=false&genero=false&letra=false&categoria=Película" to "Película Subtitulado",
         "emision?p=1" to "En Emisión",
