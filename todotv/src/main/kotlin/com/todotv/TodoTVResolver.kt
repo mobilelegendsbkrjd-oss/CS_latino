@@ -3,7 +3,6 @@ package com.todotv
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
 
@@ -16,44 +15,6 @@ object TodoTVResolver {
         val url: String,
         val referer: String
     )
-
-    suspend fun expandServers(source: TodoTV.ChannelSource): List<TodoTV.ChannelSource> {
-        return try {
-            val html = app.get(
-                source.url,
-                referer = source.referer ?: source.url,
-                headers = buildHeaders(source.referer ?: source.url, cleanUserAgent(source.userAgent))
-            ).text
-
-            val doc = Jsoup.parse(html, source.url)
-            val servers = mutableListOf<TodoTV.ChannelSource>()
-
-            doc.select("a").forEach { a ->
-                val text = a.text().trim()
-                val href = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
-
-                if (href.isNotBlank() && isServerText(text) && isValidServerUrl(href)) {
-                    servers.add(
-                        TodoTV.ChannelSource(
-                            name = "${source.name} - ${text.ifBlank { "Servidor" }}",
-                            url = fixUrl(href, source.url),
-                            referer = source.url,
-                            userAgent = source.userAgent ?: DEFAULT_UA,
-                            embed = true
-                        )
-                    )
-                }
-            }
-
-            if (servers.isEmpty() && doc.select("iframe").isNotEmpty()) {
-                servers.add(source)
-            }
-
-            servers.distinctBy { it.url }
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
 
     suspend fun resolve(
         channelName: String,
@@ -70,7 +31,6 @@ object TodoTVResolver {
 
         val resolved: ResolvedLink? = when {
             isDirectVideo(url) -> ResolvedLink(url, referer ?: url)
-            source.embed -> resolveGenericEmbed(url, referer, ua)
             else -> resolveGenericEmbed(url, referer, ua) ?: ResolvedLink(url, referer ?: url)
         }
 
@@ -148,7 +108,7 @@ object TodoTVResolver {
         baseUrl: String,
         ua: String
     ): ResolvedLink? {
-        val iframes = Regex("""<iframe[^>]+(?:src|data-src)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val iframes = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .findAll(html)
             .mapNotNull { it.groupValues.getOrNull(1) }
             .map { fixUrl(it, baseUrl) }
@@ -229,25 +189,22 @@ object TodoTVResolver {
 
             Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""["']file["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
+
             Regex("""source\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""sources\s*:\s*\[[\s\S]*?file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
-            Regex("""src\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""sources\s*:\s*\[[\s\S]*?["']file["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
 
-            Regex("""var\s+src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
-            Regex("""atob\s*\(\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE)
+            Regex("""src\s*:\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""videoUrl\s*=\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""hls\s*=\s*["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE),
+
+            Regex("""["'](https?://[^"']+\.mp4[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""var\s+src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
         )
 
         for (regex in patterns) {
             val match = regex.find(clean) ?: continue
-            var value = match.groupValues.getOrNull(1)?.ifBlank { match.value } ?: match.value
-
-            if (!value.startsWith("http", true) && value.length > 20) {
-                value = try {
-                    String(android.util.Base64.decode(value, android.util.Base64.DEFAULT))
-                } catch (_: Exception) {
-                    value
-                }
-            }
+            val value = match.groupValues.getOrNull(1)?.ifBlank { match.value } ?: match.value
 
             if (value.startsWith("http", true)) {
                 return value
@@ -257,7 +214,11 @@ object TodoTVResolver {
             }
         }
 
-        return null
+        val flv = Regex("""https?://[^"'\s<>]+?\.flv[^"'\s<>]*""", RegexOption.IGNORE_CASE)
+            .find(clean)
+            ?.value
+
+        return flv
     }
 
     private fun isDirectVideo(url: String): Boolean {
@@ -272,32 +233,6 @@ object TodoTVResolver {
                 clean.contains("footy.php") ||
                 clean.contains("/livetv/") ||
                 clean.contains("/play/")
-    }
-
-    private fun isServerText(text: String): Boolean {
-        val lower = text.lowercase()
-
-        return lower.contains("opción") ||
-                lower.contains("opcion") ||
-                lower.contains("servidor") ||
-                lower.contains("server") ||
-                lower.contains("fhd") ||
-                lower.contains("hd") ||
-                lower.contains("ver") ||
-                lower.contains("reproducir")
-    }
-
-    private fun isValidServerUrl(url: String): Boolean {
-        val lower = url.lowercase()
-
-        return url.isNotBlank() &&
-                !lower.contains("paypal") &&
-                !lower.contains("telegram") &&
-                !lower.contains("whatsapp") &&
-                !lower.contains("facebook") &&
-                !lower.contains("instagram") &&
-                !lower.contains("twitter") &&
-                !lower.contains("linktre.online")
     }
 
     private fun buildHeaders(referer: String, ua: String): Map<String, String> {
