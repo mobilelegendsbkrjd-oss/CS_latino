@@ -9,6 +9,7 @@ import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import org.json.JSONArray
 
 class SoloLatino : MainAPI() {
     override var mainUrl = "https://sololatino.net"
@@ -50,9 +51,15 @@ class SoloLatino : MainAPI() {
             val href = linkElement.attr("href")
             val absoluteUrl = fixUrl(href)
             val title = card.selectFirst(".card__title, h3, h2")?.text()?.trim() ?: return@mapNotNull null
-            val poster = card.selectFirst("img")?.let {
-                it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
-            }?.replace(Regex("-\\d+x\\d+"), "")
+            val img = card.selectFirst("img")
+            var poster: String? = null
+
+            if (img != null) {
+                poster = img.attr("data-src")
+                if (poster.isNullOrBlank()) poster = img.attr("data-lazy-src")
+                if (poster.isNullOrBlank()) poster = img.attr("src")
+                poster = poster?.replace(Regex("-\\d+x\\d+"), "")
+            }
 
             // CAMBIO 2: Detectar anime (COMPATIBLE)
             val isMovie = absoluteUrl.contains("/pelicula/")
@@ -79,25 +86,50 @@ class SoloLatino : MainAPI() {
     }
 
     // ====================== SAGAS ======================
-    private suspend fun getSagas(): List<SearchResponse> {
+    private suspend fun getSagasRaw(): List<SagaItem> {
         return try {
-            val json = app.get(sagasJson).text
-            val parsed = AppUtils.tryParseJson<List<SagaItem>>(json) ?: return emptyList()
-            parsed.mapIndexedNotNull { index, saga ->
-                val title = saga.title ?: return@mapIndexedNotNull null
-                newTvSeriesSearchResponse(title, "$mainUrl/saga/$index", TvType.TvSeries) {
-                    this.posterUrl = saga.poster
+            val arr = JSONArray(app.get(sagasJson).text)
+            val out = mutableListOf<SagaItem>()
+
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val movies = mutableListOf<SagaMovie>()
+                val mArr = o.optJSONArray("movies")
+
+                if (mArr != null) {
+                    for (j in 0 until mArr.length()) {
+                        val m = mArr.getJSONObject(j)
+                        movies.add(SagaMovie(m.optString("name", null), m.optString("url", null)))
+                    }
                 }
+
+                out.add(
+                    SagaItem(
+                        o.optString("title", null),
+                        o.optString("poster", null),
+                        o.optString("description", null),
+                        movies
+                    )
+                )
             }
-        } catch (_: Exception) { emptyList() }
+
+            out
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private suspend fun getSagas(): List<SearchResponse> {
+        return getSagasRaw().mapIndexedNotNull { index, saga ->
+            val title = saga.title ?: return@mapIndexedNotNull null
+            newTvSeriesSearchResponse(title, "$mainUrl/saga/$index", TvType.TvSeries) {
+                this.posterUrl = saga.poster
+            }
+        }
     }
 
     private suspend fun getSagaData(index: Int): SagaItem? {
-        return try {
-            val json = app.get(sagasJson).text
-            val parsed = AppUtils.tryParseJson<List<SagaItem>>(json)
-            parsed?.getOrNull(index)
-        } catch (_: Exception) { null }
+        return getSagasRaw().getOrNull(index)
     }
 
     // ====================== HELPER PARA CATEGORÍAS CON SCROLL INFINITO ======================
@@ -108,7 +140,7 @@ class SoloLatino : MainAPI() {
         var currentPage = 1
         var hasMore = true
 
-        while (hasMore && currentPage <= 10) { // Límite de 10 páginas
+        while (hasMore && currentPage <= 3) { // Límite de 10 páginas
             try {
                 val url = if (currentPage == 1) baseUrl else "$baseUrl&page=$currentPage"
 
@@ -364,7 +396,28 @@ class SoloLatino : MainAPI() {
             try {
                 val match = Regex("""dataLink = (\[.+?\]);""").find(html)
                 if (match != null) {
-                    val items = AppUtils.tryParseJson<List<Item>>(match.groupValues[1]) ?: emptyList()
+                    val items = mutableListOf<Item>()
+                    val arr = JSONArray(match.groupValues[1])
+
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val embeds = mutableListOf<Embed>()
+                        val embedsArr = obj.optJSONArray("sortedEmbeds")
+
+                        if (embedsArr != null) {
+                            for (j in 0 until embedsArr.length()) {
+                                val e = embedsArr.getJSONObject(j)
+                                embeds.add(
+                                    Embed(
+                                        e.optString("servername", null),
+                                        e.optString("link", null)
+                                    )
+                                )
+                            }
+                        }
+
+                        items.add(Item(obj.optString("video_language", null), embeds))
+                    }
                     for (item in items) {
                         for (embed in item.sortedEmbeds) {
                             if (embed.servername.equals("download", ignoreCase = true)) continue
