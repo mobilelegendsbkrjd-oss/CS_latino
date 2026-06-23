@@ -35,8 +35,6 @@ object W3UWebSources {
     WebProvider("CableVisionHD", "https://www.cablevisionhd.com"),
     WebProvider("Teveplus", "https://www.tvplusgratis2.com"),
     WebProvider("Telegratis", "https://www.telegratishd.com"),
-    WebProvider("VerTvCable", "https://www.vertvcable.com"),
-    WebProvider("SinTelevisor", "https://www.thesintelevisor.com")
 )
 
     private var cache: List<WebChannelResult> = emptyList()

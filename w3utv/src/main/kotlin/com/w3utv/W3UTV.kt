@@ -32,32 +32,67 @@ class W3UTV : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val channels = W3UWebSources.getWebChannels()
+    val channels = W3UWebSources.getWebChannels()
 
-        val lists = mutableListOf<HomePageList>()
+    val lists = mutableListOf<HomePageList>()
 
-        fun addCategory(title: String, filter: (W3UWebSources.WebChannelResult) -> Boolean) {
-            val cards = channels
-                .filter(filter)
-                .map { toCard(it) }
-                .distinctBy { it.name }
+    fun addCategory(title: String, filter: (W3UWebSources.WebChannelResult) -> Boolean) {
+        val cards = channels
+            .filter(filter)
+            .map { toCard(it) }
+            .distinctBy { it.name }
 
-            if (cards.isNotEmpty()) {
-                lists.add(HomePageList(title, cards, isHorizontalImages = true))
-            }
+        if (cards.isNotEmpty()) {
+            lists.add(HomePageList(title, cards, isHorizontalImages = true))
         }
-
-        addCategory("🔥 Todos los canales") { true }
-        addCategory("⚽ Deportes") { it.category == "Deportes" }
-        addCategory("📰 Noticias") { it.category == "Noticias" }
-        addCategory("🎬 Cine y Series") { it.category == "Cine y Series" }
-        addCategory("👧 Infantiles") { it.category == "Infantiles" }
-        addCategory("🎵 Música") { it.category == "Música" }
-        addCategory("🌎 Internacionales") { it.category == "Internacionales" }
-        addCategory("📺 Entretenimiento") { it.category == "Entretenimiento" }
-
-        return newHomePageResponse(lists, false)
     }
+
+    fun addProviderCategory(title: String, providerName: String) {
+        val cards = channels
+            .filter { channel ->
+                channel.sources.any { source ->
+                    source.name.contains(providerName, ignoreCase = true) ||
+                    source.url.contains(providerUrlKey(providerName), ignoreCase = true)
+                }
+            }
+            .map { toCard(it) }
+            .distinctBy { it.name }
+
+        if (cards.isNotEmpty()) {
+            lists.add(HomePageList(title, cards, isHorizontalImages = true))
+        }
+    }
+
+    // Categorías generales
+    addCategory("🔥 Todos los canales") { true }
+    addCategory("⚽ Deportes") { it.category == "Deportes" }
+    addCategory("📰 Noticias") { it.category == "Noticias" }
+    addCategory("🎬 Cine y Series") { it.category == "Cine y Series" }
+    addCategory("👧 Infantiles") { it.category == "Infantiles" }
+    addCategory("🎵 Música") { it.category == "Música" }
+    addCategory("🌎 Internacionales") { it.category == "Internacionales" }
+    addCategory("📺 Entretenimiento") { it.category == "Entretenimiento" }
+
+    // Categorías por página
+    addProviderCategory("🌐 TvporinternetHD", "TvporinternetHD")
+    addProviderCategory("🌐 Tv Libre Futbol", "Tv Libre Futbol")
+    addProviderCategory("🌐 CableVisionHD", "CableVisionHD")
+    addProviderCategory("🌐 Teveplus", "Teveplus")
+    addProviderCategory("🌐 Telegratis", "Telegratis")
+
+    return newHomePageResponse(lists, false)
+}
+
+private fun providerUrlKey(providerName: String): String {
+    return when (providerName.lowercase()) {
+        "tvporinternethd" -> "tvporinternet2.com"
+        "tv libre futbol" -> "librefutbol2.com"
+        "cablevisionhd" -> "cablevisionhd.com"
+        "teveplus" -> "tvplusgratis2.com"
+        "telegratis" -> "telegratishd.com"
+        else -> providerName.lowercase()
+    }
+}
 
     override suspend fun search(query: String): List<SearchResponse> {
         return W3UWebSources.getWebChannels()
