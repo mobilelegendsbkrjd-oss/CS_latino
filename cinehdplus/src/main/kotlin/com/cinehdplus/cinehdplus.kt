@@ -53,7 +53,7 @@ class CineHDPlus : MainAPI() {
         val results = mutableListOf<SearchResponse>()
 
         document.select(
-            "article, div.group.relative, div.grid div.group, div.grid a, a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/serie-]"
+            "article, div.group.relative, div.grid div.group, div.grid a, a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/series-tv-], a[href*=/serie-]"
         ).forEach { item ->
             val result = toSearchResult(item) ?: return@forEach
             if (results.none { it.url == result.url }) results.add(result)
@@ -69,7 +69,7 @@ class CineHDPlus : MainAPI() {
         val a: Element = if (element.tagName() == "a") {
             element
         } else {
-            element.selectFirst("a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/serie-]")
+            element.selectFirst("a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/series-tv-], a[href*=/serie-]")
                 ?: return null
         }
 
@@ -98,9 +98,13 @@ class CineHDPlus : MainAPI() {
 
         val img1: Element? = element.selectFirst("img")
         val img2: Element? = a.selectFirst("img")
+        val poster: String? = fixImageUrl(pickImageFromElement(img1) ?: pickImageFromElement(img2))
+        val img = element.selectFirst("img")
+        val src = img?.attr("src").orEmpty()
 
-        val posterRaw: String? = pickImageFromElement(img1) ?: pickImageFromElement(img2)
-        val poster: String? = fixImageUrl(posterRaw)
+        if (src.contains("/wp-content/uploads/banners/", true)) {
+            return null
+        }
 
         return if (isMovie) {
             newMovieSearchResponse(title, fixedLink, TvType.Movie) {
@@ -123,7 +127,7 @@ class CineHDPlus : MainAPI() {
             try {
                 val document = app.get(url, headers = pageHeaders()).document
                 val results = document.select(
-                    "article, div.group.relative, div.grid div.group, div.grid a, a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/serie-]"
+                    "article, div.group.relative, div.grid div.group, div.grid a, a[href*=/pelicula-], a[href*=/tvshows/], a[href*=/series-tv-], a[href*=/serie-]"
                 ).mapNotNull { toSearchResult(it) }
 
                 if (results.isNotEmpty()) return results.distinctBy { it.url }
@@ -139,20 +143,24 @@ class CineHDPlus : MainAPI() {
 
         val isTv = document.selectFirst("body.tvshows-template-default") != null ||
                 url.contains("/tvshows/", true) ||
+                url.contains("/series-tv-", true) ||
                 url.contains("/serie-", true)
 
         val titleMeta: String? = document.selectFirst("meta[property=og:title]")?.attr("content")
         val titleText: String? = document.selectFirst("h2.text-xl, h1")?.text()
 
         val title = cleanTitle(
-            (titleText ?: titleMeta ?: "Sin título")
-                .substringBefore("|")
+            (titleText ?: titleMeta ?: "Sin título").substringBefore("|")
         )
 
         val posterMeta: String? = document.selectFirst("meta[property=og:image]")?.attr("content")
-        val posterImgEl: Element? = document.selectFirst("div.aspect-2\\/3 img, img.absolute")
-        val posterImg: String? = pickImageFromElement(posterImgEl)
         val posterHistory: String? = document.selectFirst("#rm-post-history")?.attr("data-poster")
+
+        val posterImgEl: Element? = document.selectFirst(
+            "div.aspect-2\\/3 img, .aspect-2\\/3 img, img.absolute"
+        )
+
+        val posterImg: String? = pickImageFromElement(posterImgEl)
         val poster: String? = fixImageUrl(posterImg ?: posterHistory ?: posterMeta)
 
         val backdropEl: Element? = document.selectFirst(".absolute.inset-0 img, .opacity-20")
@@ -341,6 +349,15 @@ class CineHDPlus : MainAPI() {
     private fun pickImageFromElement(img: Element?): String? {
         if (img == null) return null
 
+        val src: String = img.attr("src")
+        if (src.isNotBlank() && !src.startsWith("data:", true)) return src
+
+        val srcset: String = img.attr("srcset")
+        if (srcset.isNotBlank() && !srcset.startsWith("data:", true)) {
+            val best = srcset.split(",").lastOrNull()?.trim()?.substringBefore(" ")
+            if (!best.isNullOrBlank()) return best
+        }
+
         val dataSrc: String = img.attr("data-src")
         if (dataSrc.isNotBlank() && !dataSrc.startsWith("data:", true)) return dataSrc
 
@@ -349,14 +366,6 @@ class CineHDPlus : MainAPI() {
 
         val original: String = img.attr("data-original")
         if (original.isNotBlank() && !original.startsWith("data:", true)) return original
-
-        val srcset: String = img.attr("srcset")
-        if (srcset.isNotBlank() && !srcset.startsWith("data:", true)) {
-            return srcset.substringBefore(" ").trim()
-        }
-
-        val src: String = img.attr("src")
-        if (src.isNotBlank() && !src.startsWith("data:", true)) return src
 
         return null
     }
@@ -367,6 +376,7 @@ class CineHDPlus : MainAPI() {
         val clean = raw
             .replace("\\/", "/")
             .replace("&amp;", "&")
+            .replace("&#038;", "&")
             .trim()
 
         if (clean.startsWith("data:", true)) return null
@@ -403,6 +413,8 @@ class CineHDPlus : MainAPI() {
             .replace("Online HD", "", ignoreCase = true)
             .replace("Online", "", ignoreCase = true)
             .replace(Regex("""\(\d{4}\)"""), "")
+            .replace("– CineHDPlus", "", ignoreCase = true)
+            .replace("- CineHDPlus", "", ignoreCase = true)
             .trim()
     }
 
