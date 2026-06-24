@@ -21,14 +21,10 @@ class Tlnovelas : MainAPI() {
     private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url =
-            if (page <= 1) "$mainUrl/${request.data}"
-            else "$mainUrl/${request.data}/page/$page"
-
+        val url = if (page <= 1) "$mainUrl/${request.data}" else "$mainUrl/${request.data}/page/$page"
         val document = app.get(url).document
 
-        val home = document
-            .select(".vk-poster, .ani-card, .p-content, .ani-txt")
+        val home = document.select(".vk-poster, .ani-card, .p-content, .ani-txt")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -36,10 +32,9 @@ class Tlnovelas : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse {
-        val title =
-            selectFirst(".ani-txt, .p-title, .vk-info p")?.text()
-                ?: selectFirst("a")?.attr("title")
-                ?: ""
+        val title = selectFirst(".ani-txt, .p-title, .vk-info p")?.text()
+            ?: selectFirst("a")?.attr("title")
+            ?: ""
 
         var href = selectFirst("a")?.attr("href") ?: ""
         val poster = selectFirst("img")?.attr("src")
@@ -48,7 +43,6 @@ class Tlnovelas : MainAPI() {
             val slug = href.removeSuffix("/")
                 .substringAfterLast("/")
                 .replace(Regex("(?i)-capitulo-\\d+|-capítulo-\\d+"), "")
-
             href = "$mainUrl/novela/$slug/"
         }
 
@@ -58,9 +52,7 @@ class Tlnovelas : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/buscar/?q=$query"
-
-        return app.get(url)
+        return app.get("$mainUrl/buscar/?q=$query")
             .document
             .select(".vk-poster, .ani-card")
             .mapNotNull { it.toSearchResult() }
@@ -69,7 +61,6 @@ class Tlnovelas : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-
         val novelaLink = document.selectFirst("a[href*='/novela/']")?.attr("href")
 
         val finalDoc =
@@ -83,14 +74,12 @@ class Tlnovelas : MainAPI() {
             ?.trim()
             ?: "Telenovela"
 
-        val poster =
-            finalDoc.selectFirst("meta[property='og:image']")?.attr("content")
-                ?: finalDoc.selectFirst(".ani-img img")?.attr("src")
+        val poster = finalDoc.selectFirst("meta[property='og:image']")?.attr("content")
+            ?: finalDoc.selectFirst(".ani-img img")?.attr("src")
 
         val episodes = finalDoc.select("a[href*='/ver/']")
             .map {
                 val epUrl = it.attr("href")
-
                 val epName = it.text()
                     .replace(title, "", true)
                     .replace(Regex("(?i)Ver|Capitulo|Capítulo"), "")
@@ -119,8 +108,7 @@ class Tlnovelas : MainAPI() {
                 val decodedChars = mutableListOf<Char>()
 
                 for (i in encodedStr.indices) {
-                    val charCode = encodedStr[i].code - key - i
-                    decodedChars.add(charCode.toChar())
+                    decodedChars.add((encodedStr[i].code - key - i).toChar())
                 }
 
                 URLDecoder.decode(decodedChars.joinToString(""), "UTF-8")
@@ -132,30 +120,41 @@ class Tlnovelas : MainAPI() {
         }
     }
 
-    private fun normalizeVideoLink(rawInput: String): String? {
+    private fun expandVideoLinks(rawInput: String): List<String> {
         val raw = rawInput.trim().trim('\'', '"')
-        if (raw.isBlank()) return null
+        if (raw.isBlank()) return emptyList()
 
-        // Caso Tlnovelas viejo:
+        // Caso Marimar/Tlnovelas viejo:
         // e[0]='DVIHJl1Av2ed|1'
-        // El |1 NO es cifrado útil aquí, es selector de servidor.
+        // Debe ir primero /f/, no /e/.
         if (raw.matches(Regex("""[A-Za-z0-9]+(?:\|\d+)?"""))) {
             val id = raw.substringBefore("|")
-            return "https://hqq.to/e/$id"
+            return listOf(
+                "https://hqq.to/f/$id",
+                "https://hqq.to/e/$id"
+            )
         }
 
         val decoded = decodeVideoUrl(raw)
 
         return when {
-            decoded.startsWith("http") -> decoded
-            raw.startsWith("//") -> "https:$raw"
-            decoded.startsWith("//") -> "https:$decoded"
-
-            decoded.matches(Regex("""[A-Za-z0-9]+""")) -> {
-                "https://hqq.to/e/$decoded"
+            decoded.startsWith("http") -> {
+                if (decoded.contains("hqq.to/e/")) {
+                    listOf(decoded.replace("/e/", "/f/"), decoded)
+                } else {
+                    listOf(decoded)
+                }
             }
 
-            else -> null
+            raw.startsWith("//") -> listOf("https:$raw")
+            decoded.startsWith("//") -> listOf("https:$decoded")
+
+            decoded.matches(Regex("""[A-Za-z0-9]+""")) -> listOf(
+                "https://hqq.to/f/$decoded",
+                "https://hqq.to/e/$decoded"
+            )
+
+            else -> emptyList()
         }
     }
 
@@ -180,22 +179,25 @@ class Tlnovelas : MainAPI() {
 
         document.select("iframe[src]").forEach {
             val link = it.attr("src").trim()
-            val fixed = normalizeVideoLink(link) ?: link
 
             if (
-                fixed.startsWith("http") &&
-                !fixed.contains("google") &&
-                !fixed.contains("facebook") &&
-                !fixed.contains("ads")
+                link.startsWith("http") &&
+                !link.contains("google") &&
+                !link.contains("facebook") &&
+                !link.contains("ads")
             ) {
-                videoLinks.add(fixed)
+                if (link.contains("hqq.to/e/")) {
+                    videoLinks.add(link.replace("/e/", "/f/"))
+                }
+
+                videoLinks.add(link)
             }
         }
 
         Regex("""e\[(\d+)\]\s*=\s*['"]([^'"]+)['"]""")
             .findAll(response)
             .forEach {
-                normalizeVideoLink(it.groupValues[2])?.let { fixed ->
+                expandVideoLinks(it.groupValues[2]).forEach { fixed ->
                     videoLinks.add(fixed)
                 }
             }
@@ -206,7 +208,7 @@ class Tlnovelas : MainAPI() {
             ?.get(1)
             ?.split(",")
             ?.forEach {
-                normalizeVideoLink(it)?.let { fixed ->
+                expandVideoLinks(it).forEach { fixed ->
                     videoLinks.add(fixed)
                 }
             }
@@ -220,7 +222,11 @@ class Tlnovelas : MainAPI() {
         Regex("""(https?://(?:hqq\.to|waaw\.to|netu\.tv|bysejikuar\.com|f75s\.com|dooodster\.com|dood\.[^/"']+|iplayerhls\.com)/[^\s"'<>]+)""")
             .findAll(response)
             .forEach {
-                videoLinks.add(it.groupValues[1])
+                val link = it.groupValues[1]
+                if (link.contains("hqq.to/e/")) {
+                    videoLinks.add(link.replace("/e/", "/f/"))
+                }
+                videoLinks.add(link)
             }
 
         if (response.contains("eval(function(p,a,c,k,e")) {
@@ -228,21 +234,23 @@ class Tlnovelas : MainAPI() {
                 val unpacker = JsUnpacker(response)
 
                 if (unpacker.detect()) {
-                    val unpacked = unpacker.unpack()
-
-                    unpacked?.let { unpackedText ->
+                    unpacker.unpack()?.let { unpacked ->
                         Regex("""file\s*:\s*["'](https?://[^"']+)""")
-                            .findAll(unpackedText)
+                            .findAll(unpacked)
                             .forEach { m ->
-                                videoLinks.add(m.groupValues[1])
+                                val link = m.groupValues[1]
+                                if (link.contains("hqq.to/e/")) {
+                                    videoLinks.add(link.replace("/e/", "/f/"))
+                                }
+                                videoLinks.add(link)
                             }
 
                         Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)""")
-                            .find(unpackedText)
-                            ?.groupValues
-                            ?.get(1)
-                            ?.let { u ->
-                                normalizeVideoLink(u)?.let { fixed -> videoLinks.add(fixed) }
+                            .findAll(unpacked)
+                            .forEach { m ->
+                                expandVideoLinks(m.groupValues[1]).forEach { fixed ->
+                                    videoLinks.add(fixed)
+                                }
                             }
                     }
                 }
@@ -253,7 +261,7 @@ class Tlnovelas : MainAPI() {
 
         videoLinks.forEach { link ->
             try {
-                if (UniversalResolver.resolve(link, link, subtitleCallback, callback)) {
+                if (UniversalResolver.resolve(link, mainUrl, subtitleCallback, callback)) {
                     success = true
                 }
             } catch (_: Exception) {}

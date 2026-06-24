@@ -23,26 +23,36 @@ object UniversalResolver {
         var success = false
 
         try {
-            success = success || loadExtractor(url, referer, subtitleCallback, callback)
-
             success = success || when {
                 url.contains("hqq.to") ||
                         url.contains("waaw.to") ||
                         url.contains("netu.tv") -> {
-                    extractHqq(url, referer, callback)
+                    // HQQ/Netu/Waaw tienen flujo JS/captcha. Usamos extractor nativo.
+                    val fixedUrl = if (url.contains("hqq.to/e/")) {
+                        url.replace("/e/", "/f/")
+                    } else {
+                        url
+                    }
+
+                    loadExtractor(fixedUrl, "https://ww2.tlnovelas.net/", subtitleCallback, callback) ||
+                            loadExtractor(url, "https://ww2.tlnovelas.net/", subtitleCallback, callback)
                 }
 
                 url.contains("bysejikuar") ||
                         url.contains("f75s") -> {
-                    extractBysejikuar(url, referer, callback)
+                    loadExtractor(url, referer, subtitleCallback, callback) ||
+                            extractBysejikuar(url, referer, callback)
                 }
 
-                url.contains("iplayerhls") -> {
-                    tryResolveGeneric(url, referer, callback)
+                url.contains("dooodster") ||
+                        url.contains("dood.") ||
+                        url.contains("doodstream") -> {
+                    loadExtractor(url, referer, subtitleCallback, callback)
                 }
 
                 else -> {
-                    tryResolveGeneric(url, referer, callback)
+                    loadExtractor(url, referer, subtitleCallback, callback) ||
+                            tryResolveGeneric(url, referer, callback)
                 }
             }
         } catch (_: Exception) {}
@@ -102,122 +112,6 @@ object UniversalResolver {
                     callback.invoke(
                         newExtractorLink("Generic", "Generic", videoUrl) {
                             this.referer = url
-                            this.quality = 0
-                            this.type =
-                                if (videoUrl.contains(".m3u8"))
-                                    ExtractorLinkType.M3U8
-                                else
-                                    ExtractorLinkType.VIDEO
-                        }
-                    )
-                    success = true
-                }
-            }
-
-            success
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private suspend fun extractHqq(
-        embedUrl: String,
-        referer: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        return try {
-            val base = getBase(embedUrl)
-
-            val videoKey = Regex("""/(?:e|d)/([A-Za-z0-9]+)""")
-                .find(embedUrl)
-                ?.groupValues
-                ?.get(1)
-                ?: return false
-
-            val res = app.get(
-                embedUrl,
-                referer = referer,
-                headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to referer,
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                )
-            )
-
-            val html = res.text
-            val cookies = res.cookies
-
-            fun findVar(name: String): String {
-                return Regex("""(?:var\s+)?$name\s*=\s*['"]([^'"]*)['"]""")
-                    .find(html)
-                    ?.groupValues
-                    ?.get(1)
-                    ?: ""
-            }
-
-            val htoken = findVar("htoken")
-            val shh = findVar("shh").ifBlank { findVar("sh") }
-            val secure = findVar("secure").ifBlank { "0" }
-            val gtr = findVar("gtr")
-            val embedfrm = findVar("embedfrm")
-            val clickHash = findVar("click_hash")
-
-
-
-            val cookieHeader = cookies.entries.joinToString("; ") {
-                "${it.key}=${it.value}"
-            }
-
-            val md5Text = app.post(
-                "$base/player/get_md5.php",
-                referer = embedUrl,
-                headers = mapOf(
-                    "User-Agent" to UA,
-                    "Origin" to base,
-                    "Referer" to embedUrl,
-                    "Accept" to "application/json,text/javascript,*/*;q=0.01",
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Cookie" to cookieHeader
-                ),
-                data = mapOf(
-                    "htoken" to htoken,
-                    "sh" to shh,
-                    "ver" to "4",
-                    "secure" to secure,
-                    "adb" to "0",
-                    "v" to videoKey,
-                    "token" to "",
-                    "gt" to gtr,
-                    "embed_from" to embedfrm,
-                    "wasmcheck" to "0",
-                    "adscore" to "",
-                    "click_hash" to clickHash,
-                    "clickx" to "0",
-                    "clicky" to "0"
-                )
-            ).text
-
-            val found = linkedSetOf<String>()
-
-            Regex("""https?:\\/\\/[^"']+?\.m3u8[^"']*""")
-                .findAll(md5Text)
-                .forEach { found.add(it.value.replace("\\/", "/")) }
-
-            Regex(""""file"\s*:\s*"([^"]+)"""")
-                .findAll(md5Text)
-                .forEach { found.add(it.groupValues[1].replace("\\/", "/")) }
-
-            Regex(""""html5_file"\s*:\s*"([^"]+)"""")
-                .findAll(md5Text)
-                .forEach { found.add(it.groupValues[1].replace("\\/", "/")) }
-
-            var success = false
-
-            found.forEach { videoUrl ->
-                if (videoUrl.startsWith("http")) {
-                    callback.invoke(
-                        newExtractorLink("HQQ", "HQQ", videoUrl) {
-                            this.referer = embedUrl
                             this.quality = 0
                             this.type =
                                 if (videoUrl.contains(".m3u8"))
