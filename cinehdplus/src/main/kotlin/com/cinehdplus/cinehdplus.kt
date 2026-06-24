@@ -338,13 +338,6 @@ class CineHDPlus : MainAPI() {
         }
     }
 
-    private fun toProxyImage(url: String): String {
-        if (!url.contains("cinehdplus.org", true)) return url
-        return "https://images.weserv.nl/?url=" + url
-            .removePrefix("https://")
-            .removePrefix("http://")
-    }
-
     private fun pickImageFromElement(img: Element?): String? {
         if (img == null) return null
 
@@ -378,14 +371,12 @@ class CineHDPlus : MainAPI() {
 
         if (clean.startsWith("data:", true)) return null
 
-        val fixed = when {
+        return when {
             clean.startsWith("//") -> "https:$clean"
             clean.startsWith("http", true) -> clean
             clean.startsWith("/") -> mainUrl.removeSuffix("/") + clean
             else -> fixUrl(clean)
         }
-
-        return toProxyImage(fixed)
     }
 
     private fun fixPlayerUrl(url: String): String {
