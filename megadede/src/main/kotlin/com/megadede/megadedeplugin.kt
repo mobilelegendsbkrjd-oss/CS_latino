@@ -1,0 +1,12 @@
+package com.megadede
+
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
+import android.content.Context
+
+@CloudstreamPlugin
+class megadedePlugin : Plugin() {
+    override fun load(context: Context) {
+        registerMainAPI(megadede())
+    }
+}
