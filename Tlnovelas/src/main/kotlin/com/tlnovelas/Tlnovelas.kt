@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
+import java.net.URLEncoder
 
 class Tlnovelas : MainAPI() {
     override var mainUrl = "https://ww2.tlnovelas.net"
@@ -18,11 +19,17 @@ class Tlnovelas : MainAPI() {
         "gratis/telenovelas/" to "Ver Telenovelas"
     )
 
-    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    private val ua =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) "$mainUrl/${request.data}" else "$mainUrl/${request.data}/page/$page"
-        val document = app.get(url).document
+        val url = if (page <= 1) {
+            "$mainUrl/${request.data}"
+        } else {
+            "$mainUrl/${request.data.removeSuffix("/")}/page/$page"
+        }
+
+        val document = app.get(url, headers = headers()).document
 
         val home = document.select(".vk-poster, .ani-card, .p-content, .ani-txt")
             .mapNotNull { it.toSearchResult() }
@@ -31,13 +38,23 @@ class Tlnovelas : MainAPI() {
         return newHomePageResponse(request.name, home, true)
     }
 
-    private fun Element.toSearchResult(): SearchResponse {
+    private fun headers(referer: String = mainUrl): Map<String, String> {
+        return mapOf(
+            "User-Agent" to ua,
+            "Referer" to referer,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        )
+    }
+
+    private fun Element.toSearchResult(): SearchResponse? {
         val title = selectFirst(".ani-txt, .p-title, .vk-info p")?.text()
             ?: selectFirst("a")?.attr("title")
-            ?: ""
+            ?: return null
 
-        var href = selectFirst("a")?.attr("href") ?: ""
-        val poster = selectFirst("img")?.attr("src")
+        if (title.isBlank()) return null
+
+        var href = selectFirst("a")?.attr("href") ?: return null
+        val poster = selectFirst("img")?.attr("src")?.let { fixUrl(it) }
 
         if (href.contains("/ver/")) {
             val slug = href.removeSuffix("/")
@@ -46,13 +63,14 @@ class Tlnovelas : MainAPI() {
             href = "$mainUrl/novela/$slug/"
         }
 
-        return newTvSeriesSearchResponse(title, fixUrl(href), TvType.TvSeries) {
+        return newTvSeriesSearchResponse(title.trim(), fixUrl(href), TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/buscar/?q=$query")
+        val q = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/buscar/?q=$q", headers = headers())
             .document
             .select(".vk-poster, .ani-card")
             .mapNotNull { it.toSearchResult() }
@@ -60,33 +78,36 @@ class Tlnovelas : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
-        val novelaLink = document.selectFirst("a[href*='/novela/']")?.attr("href")
+        val document = app.get(url, headers = headers()).document
+        val novelaLink = document.selectFirst("a[href*='/novela/']")?.attr("href")?.let { fixUrl(it) }
 
-        val finalDoc =
-            if (url.contains("/ver/") && novelaLink != null)
-                app.get(novelaLink).document
-            else document
+        val finalDoc = if (url.contains("/ver/") && novelaLink != null) {
+            app.get(novelaLink, headers = headers(url)).document
+        } else {
+            document
+        }
 
         val title = finalDoc.selectFirst("h1.card-title, .vk-title-main, h1")
             ?.text()
-            ?.replace(Regex("(?i)Capitulos de|Ver"), "")
+            ?.replace(Regex("(?i)Capitulos de|Capítulos de|Ver"), "")
             ?.trim()
             ?: "Telenovela"
 
-        val poster = finalDoc.selectFirst("meta[property='og:image']")?.attr("content")
-            ?: finalDoc.selectFirst(".ani-img img")?.attr("src")
+        val poster = finalDoc.selectFirst("meta[property='og:image']")?.attr("content")?.let { fixUrl(it) }
+            ?: finalDoc.selectFirst(".ani-img img")?.attr("src")?.let { fixUrl(it) }
 
         val episodes = finalDoc.select("a[href*='/ver/']")
-            .map {
-                val epUrl = it.attr("href")
+            .mapNotNull {
+                val epUrl = it.attr("href").takeIf { href -> href.isNotBlank() }?.let { href -> fixUrl(href) }
+                    ?: return@mapNotNull null
+
                 val epName = it.text()
                     .replace(title, "", true)
                     .replace(Regex("(?i)Ver|Capitulo|Capítulo"), "")
                     .trim()
 
                 newEpisode(epUrl) {
-                    name = if (epName.isEmpty()) "Capítulo" else "Capítulo $epName"
+                    name = if (epName.isBlank()) "Capítulo" else "Capítulo $epName"
                 }
             }
             .distinctBy { it.data }
@@ -124,36 +145,21 @@ class Tlnovelas : MainAPI() {
         val raw = rawInput.trim().trim('\'', '"')
         if (raw.isBlank()) return emptyList()
 
-        // Caso Marimar/Tlnovelas viejo:
+        // Caso real:
         // e[0]='DVIHJl1Av2ed|1'
-        // Debe ir primero /f/, no /e/.
+        // Debe entrar como embed HQQ /e/, porque get_player_image/get_md5 usan ese referer.
         if (raw.matches(Regex("""[A-Za-z0-9]+(?:\|\d+)?"""))) {
             val id = raw.substringBefore("|")
-            return listOf(
-                "https://hqq.to/f/$id",
-                "https://hqq.to/e/$id"
-            )
+            return listOf("https://hqq.to/e/$id")
         }
 
-        val decoded = decodeVideoUrl(raw)
+        val decoded = decodeVideoUrl(raw).trim()
 
         return when {
-            decoded.startsWith("http") -> {
-                if (decoded.contains("hqq.to/e/")) {
-                    listOf(decoded.replace("/e/", "/f/"), decoded)
-                } else {
-                    listOf(decoded)
-                }
-            }
-
+            decoded.startsWith("http") -> listOf(decoded)
             raw.startsWith("//") -> listOf("https:$raw")
             decoded.startsWith("//") -> listOf("https:$decoded")
-
-            decoded.matches(Regex("""[A-Za-z0-9]+""")) -> listOf(
-                "https://hqq.to/f/$decoded",
-                "https://hqq.to/e/$decoded"
-            )
-
+            decoded.matches(Regex("""[A-Za-z0-9]+""")) -> listOf("https://hqq.to/e/$decoded")
             else -> emptyList()
         }
     }
@@ -164,32 +170,21 @@ class Tlnovelas : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val headers = mapOf(
-            "User-Agent" to ua,
-            "Referer" to mainUrl,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Sec-Fetch-Mode" to "navigate"
-        )
-
-        val res = app.get(data, headers = headers)
+        val res = app.get(data, headers = headers(mainUrl))
         val response = res.text
         val document = res.document
 
         val videoLinks = linkedSetOf<String>()
 
         document.select("iframe[src]").forEach {
-            val link = it.attr("src").trim()
+            val link = fixUrl(it.attr("src").trim())
 
             if (
                 link.startsWith("http") &&
-                !link.contains("google") &&
-                !link.contains("facebook") &&
-                !link.contains("ads")
+                !link.contains("google", true) &&
+                !link.contains("facebook", true) &&
+                !link.contains("ads", true)
             ) {
-                if (link.contains("hqq.to/e/")) {
-                    videoLinks.add(link.replace("/e/", "/f/"))
-                }
-
                 videoLinks.add(link)
             }
         }
@@ -216,17 +211,13 @@ class Tlnovelas : MainAPI() {
         Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
             .findAll(response)
             .forEach {
-                videoLinks.add(it.groupValues[1])
+                videoLinks.add(it.groupValues[1].replace("\\/", "/"))
             }
 
         Regex("""(https?://(?:hqq\.to|waaw\.to|netu\.tv|bysejikuar\.com|f75s\.com|dooodster\.com|dood\.[^/"']+|iplayerhls\.com)/[^\s"'<>]+)""")
             .findAll(response)
             .forEach {
-                val link = it.groupValues[1]
-                if (link.contains("hqq.to/e/")) {
-                    videoLinks.add(link.replace("/e/", "/f/"))
-                }
-                videoLinks.add(link)
+                videoLinks.add(it.groupValues[1].replace("\\/", "/"))
             }
 
         if (response.contains("eval(function(p,a,c,k,e")) {
@@ -238,11 +229,7 @@ class Tlnovelas : MainAPI() {
                         Regex("""file\s*:\s*["'](https?://[^"']+)""")
                             .findAll(unpacked)
                             .forEach { m ->
-                                val link = m.groupValues[1]
-                                if (link.contains("hqq.to/e/")) {
-                                    videoLinks.add(link.replace("/e/", "/f/"))
-                                }
-                                videoLinks.add(link)
+                                videoLinks.add(m.groupValues[1].replace("\\/", "/"))
                             }
 
                         Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)""")
@@ -261,7 +248,17 @@ class Tlnovelas : MainAPI() {
 
         videoLinks.forEach { link ->
             try {
-                if (UniversalResolver.resolve(link, mainUrl, subtitleCallback, callback)) {
+                val referer = if (
+                    link.contains("hqq.to", true) ||
+                    link.contains("waaw.to", true) ||
+                    link.contains("netu.tv", true)
+                ) {
+                    mainUrl
+                } else {
+                    data
+                }
+
+                if (UniversalResolver.resolve(link, referer, subtitleCallback, callback)) {
                     success = true
                 }
             } catch (_: Exception) {}
