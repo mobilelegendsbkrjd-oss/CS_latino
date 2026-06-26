@@ -1,4 +1,4 @@
-package com.Animeav1
+package com.animefenix
 
 import com.lagradost.cloudstream3.extractors.VidStack
 import com.lagradost.cloudstream3.utils.ExtractorApi

@@ -4,7 +4,12 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URLEncoder
 
 class OpuxaExtractor : ExtractorApi() {
 
@@ -14,14 +19,15 @@ class OpuxaExtractor : ExtractorApi() {
 
     override suspend fun getUrl(
         url: String,
-        referer: String?
-    ): List<ExtractorLink>? {
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val realReferer = referer ?: url
 
-        val links = mutableListOf<ExtractorLink>()
         val headers = mapOf(
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5",
-            "Accept-Encoding" to "gzip, deflate, br",
+            "Accept-Language" to "es-419,es;q=0.9,en;q=0.8",
             "DNT" to "1",
             "Connection" to "keep-alive",
             "Upgrade-Insecure-Requests" to "1",
@@ -33,90 +39,98 @@ class OpuxaExtractor : ExtractorApi() {
         )
 
         try {
-            // Obtener la página con headers
-            val doc = app.get(url, referer = referer, headers = headers).document
-            
-            // Buscar el iframe
-            val iframe = doc.selectFirst("iframe[src]") ?: return null
-            
-            var iframeUrl = iframe.attr("src")
-            if (iframeUrl.startsWith("/")) {
-                iframeUrl = "$mainUrl$iframeUrl"
-            }
-            
-            // Agregar parámetros importantes si no están
-            if (!iframeUrl.contains("http_referer")) {
-                iframeUrl += if (iframeUrl.contains("?")) {
-                    "&http_referer=${referer?.encodeURL()}"
-                } else {
-                    "?http_referer=${referer?.encodeURL()}"
-                }
-            }
-            
-            if (!iframeUrl.contains("autoplay")) {
-                iframeUrl += "&autoplay=yes"
-            }
-            
-            println("DEBUG: Iframe URL: $iframeUrl")
-            
-            // Intentar cargar el extractor con esta URL
-            loadExtractor(
-                iframeUrl,
-                referer ?: url,
-                { /* sin subs */ },
+            val doc = app.get(
+                url,
+                referer = realReferer,
                 headers = headers
-            ) { link ->
-                println("DEBUG: Found link: ${link.url}")
-                links.add(link)
+            ).document
+
+            val iframe = doc.selectFirst("iframe[src]")
+
+            if (iframe != null) {
+                var iframeUrl = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
+
+                if (iframeUrl.startsWith("//")) iframeUrl = "https:$iframeUrl"
+                if (iframeUrl.startsWith("/")) iframeUrl = "$mainUrl$iframeUrl"
+
+                if (!iframeUrl.contains("http_referer")) {
+                    iframeUrl += if (iframeUrl.contains("?")) {
+                        "&http_referer=${realReferer.encodeURL()}"
+                    } else {
+                        "?http_referer=${realReferer.encodeURL()}"
+                    }
+                }
+
+                if (!iframeUrl.contains("autoplay")) {
+                    iframeUrl += if (iframeUrl.contains("?")) "&autoplay=yes" else "?autoplay=yes"
+                }
+
+                loadExtractor(
+                    fixHostsLinks(iframeUrl),
+                    realReferer,
+                    subtitleCallback,
+                    callback
+                )
             }
-            
-            // Si no funcionó, intentar métodos alternativos
-            if (links.isEmpty()) {
-                // Buscar en scripts para URLs de video
-                doc.select("script").forEach { script ->
-                    val scriptContent = script.html()
-                    
-                    // Buscar URLs comunes
-                    val patterns = listOf(
-                        """src\s*:\s*["']([^"']+)["']""".toRegex(),
-                        """file\s*:\s*["']([^"']+)["']""".toRegex(),
-                        """video_url\s*:\s*["']([^"']+)["']""".toRegex(),
-                        """["'](https?://[^"'\s]+\.(?:m3u8|mp4|mkv|avi))["']""".toRegex(),
-                        """embed/[^"']+["']""".toRegex()
-                    )
-                    
-                    patterns.forEach { pattern ->
-                        pattern.findAll(scriptContent).forEach { match ->
-                            var foundUrl = match.groups[1]?.value ?: match.value
-                            foundUrl = foundUrl.trim('\'', '"', ' ')
-                            
-                            if (foundUrl.isNotBlank() && foundUrl.startsWith("http")) {
-                                println("DEBUG: Found video URL in script: $foundUrl")
-                                
+
+            doc.select("script").forEach { script ->
+                val scriptContent = script.html()
+
+                val patterns = listOf(
+                    """src\s*[:=]\s*["']([^"']+)["']""".toRegex(),
+                    """file\s*[:=]\s*["']([^"']+)["']""".toRegex(),
+                    """video_url\s*[:=]\s*["']([^"']+)["']""".toRegex(),
+                    """["'](https?://[^"'\s]+?\.(?:m3u8|mp4|mkv|avi)(?:\?[^"'\s]*)?)["']""".toRegex(),
+                    """["'](https?://[^"']+?/embed/[^"']+)["']""".toRegex()
+                )
+
+                patterns.forEach { pattern ->
+                    pattern.findAll(scriptContent).forEach { match ->
+                        val foundUrl = match.groups[1]?.value
+                            ?.trim('\'', '"', ' ')
+                            ?: return@forEach
+
+                        if (foundUrl.startsWith("http")) {
+                            val fixed = fixHostsLinks(foundUrl)
+
+                            if (
+                                fixed.contains(".m3u8") ||
+                                fixed.contains(".mp4") ||
+                                fixed.contains(".mkv") ||
+                                fixed.contains(".avi")
+                            ) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        name,
+                                        name,
+                                        fixed,
+                                        INFER_TYPE
+                                    ) {
+                                        this.referer = realReferer
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
+                            } else {
                                 loadExtractor(
-                                    fixHostsLinks(foundUrl),
-                                    referer ?: url,
-                                    { /* sin subs */ },
-                                    headers = headers
-                                ) { link ->
-                                    links.add(link)
-                                }
+                                    fixed,
+                                    realReferer,
+                                    subtitleCallback,
+                                    callback
+                                )
                             }
                         }
                     }
                 }
             }
-            
+
         } catch (e: Exception) {
-            println("DEBUG: Error in Opuxa extractor: ${e.message}")
-            e.printStackTrace()
+            println("Opuxa extractor error: ${e.message}")
         }
-        
-        return if (links.isEmpty()) null else links
     }
 
-    private fun String.encodeURL(): String = 
-        java.net.URLEncoder.encode(this, "UTF-8")
+    private fun String.encodeURL(): String {
+        return URLEncoder.encode(this, "UTF-8")
+    }
 
     private fun fixHostsLinks(url: String): String {
         return url

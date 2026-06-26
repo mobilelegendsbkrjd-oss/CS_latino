@@ -1,4 +1,4 @@
-package com.Animeav1
+package com.animeav1
 
 import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.Episode

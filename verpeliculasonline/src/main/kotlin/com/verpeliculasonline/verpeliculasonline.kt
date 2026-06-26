@@ -14,11 +14,11 @@ class VerPeliculasOnline : MainAPI() {
 
     // Agregamos más categorías
     override val mainPage = mainPageOf(
-        "/" to "Inicio",
-        "/categoria/peliculas/" to "Películas",
-        "/categoria/series/" to "Series",
+        "/audio/latino/" to "Latino",
+        "/pelicula/" to "Películas",
+        "/genero/terror/" to "Terror",
         "/genero/accion/" to "Acción",
-        "/genero/aventura/" to "Aventura",
+        "/genero/animacion/" to "Animación",
         "/genero/drama/" to "Drama"
     )
 
