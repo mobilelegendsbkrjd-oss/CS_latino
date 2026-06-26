@@ -1,4 +1,4 @@
-package com.tubepelis
+package com.verpeliculasonline
 
 import com.lagradost.cloudstream3.Prerelease
 import com.lagradost.cloudstream3.SubtitleFile

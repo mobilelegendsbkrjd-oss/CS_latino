@@ -3,10 +3,10 @@ package com.tubepelis
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.tubepelis.FilemoonResolver
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 
-class tubepelis : MainAPI() {
+class TubePelis  : MainAPI() {
 
     override var mainUrl = "https://www.tubepelis.com"
 
@@ -20,24 +20,37 @@ class tubepelis : MainAPI() {
         TvType.Movie
     )
 
-    // ============================================================
-    // HOME
-    // ============================================================
-
     override val mainPage = mainPageOf(
 
-        "$mainUrl/pelicula/ultimas-peliculas/" to "Últimas",
+        "$mainUrl/" to "🆕 Recientes",
+        "$mainUrl/pelicula/ultimas-peliculas/" to "📅 Últimas",
+        "$mainUrl/pelicula/peliculas-mas-vistas/" to "🔥 Más vistas",
 
-        "$mainUrl/pelicula/peliculas-mas-vistas/" to "Más vistas",
-
-        "$mainUrl/pelicula/peliculas-mas-votadas/" to "Más valoradas"
+        "$mainUrl/categoria/accion/" to "💥 Acción",
+        "$mainUrl/categoria/animacion-e-infantil/" to "🧸 Animación",
+        "$mainUrl/categoria/artes-marciales/" to "🥋 Artes Marciales",
+        "$mainUrl/categoria/aventura/" to "🗺️ Aventura",
+        "$mainUrl/categoria/belico/" to "🎖️ Bélico",
+        "$mainUrl/categoria/ciencia-ficcion/" to "🚀 Ciencia Ficción",
+        "$mainUrl/categoria/comedia/" to "😂 Comedia",
+        "$mainUrl/categoria/deporte/" to "⚽ Deporte",
+        "$mainUrl/categoria/documentales/" to "📚 Documentales",
+        "$mainUrl/categoria/drama/" to "🎭 Drama",
+        "$mainUrl/categoria/fantasia/" to "🪄 Fantasía",
+        "$mainUrl/categoria/intriga/" to "🕵️ Intriga",
+        "$mainUrl/categoria/musical/" to "🎵 Musical",
+        "$mainUrl/categoria/religiosas/" to "✝️ Religiosas",
+        "$mainUrl/categoria/romance/" to "💕 Romance",
+        "$mainUrl/categoria/suspenso/" to "😱 Suspenso",
+        "$mainUrl/categoria/terror/" to "👻 Terror",
+        "$mainUrl/categoria/western/" to "🤠 Western",
+        "$mainUrl/pelicula/ultimas-peliculas/fullhd/" to "🎬 Full HD"
     )
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
         val url =
             if (page == 1) {
                 request.data
@@ -45,14 +58,11 @@ class tubepelis : MainAPI() {
                 "${request.data}?page=$page"
             }
 
-        val document =
-            app.get(url).document
+        val document = app.get(url).document
 
         val home = document
             .select("li.peli_bx")
-            .mapNotNull {
-                it.toSearchResult()
-            }
+            .mapNotNull { it.toSearchResult() }
 
         return newHomePageResponse(
             request.name,
@@ -60,58 +70,29 @@ class tubepelis : MainAPI() {
         )
     }
 
-    // ============================================================
-    // SEARCH
-    // ============================================================
+    override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/buscar/?q=$query"
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-
-        val url =
-            "$mainUrl/buscar/?q=$query"
-
-        val document =
-            app.get(url).document
+        val document = app.get(url).document
 
         return document
             .select("li.peli_bx")
-            .mapNotNull {
-                it.toSearchResult()
-            }
+            .mapNotNull { it.toSearchResult() }
     }
 
-    // ============================================================
-    // LOAD
-    // ============================================================
-
-    override suspend fun load(
-        url: String
-    ): LoadResponse {
-
-        val document =
-            app.get(url).document
+    override suspend fun load(url: String): LoadResponse {
+        val document = app.get(url).document
 
         val title =
-            document.selectFirst(
-                "meta[property=og:title]"
-            )?.attr("content")
-
-                ?: document.selectFirst("h1")
-                    ?.text()
-
+            document.selectFirst("meta[property=og:title]")?.attr("content")
+                ?: document.selectFirst("h1")?.text()
                 ?: "Sin título"
 
         val poster =
-            document.selectFirst(
-                "meta[property=og:image]"
-            )?.attr("content")
+            document.selectFirst("meta[property=og:image]")?.attr("content")
 
         val plot =
-            document.selectFirst(
-                "meta[property=og:description]"
-            )?.attr("content")
-
+            document.selectFirst("meta[property=og:description]")?.attr("content")
                 ?: ""
 
         return newMovieLoadResponse(
@@ -120,16 +101,10 @@ class tubepelis : MainAPI() {
             TvType.Movie,
             url
         ) {
-
             this.posterUrl = poster
-
             this.plot = plot
         }
     }
-
-    // ============================================================
-    // LOAD LINKS
-    // ============================================================
 
     override suspend fun loadLinks(
         data: String,
@@ -137,7 +112,6 @@ class tubepelis : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
         val document = app.get(
             data,
             headers = mapOf(
@@ -146,23 +120,17 @@ class tubepelis : MainAPI() {
             )
         ).document
 
-        val players =
-            mutableListOf<String>()
-
-        // ========================================================
-        // IFRAME PLAYERS
-        // ========================================================
+        val players = mutableListOf<String>()
 
         document.select("iframe").forEach {
+            val src = it.attr("data-src")
+                .ifBlank { it.attr("src") }
+                .trim()
 
-            val src =
-                it.attr("src")
-                    .ifBlank {
-                        it.attr("data-src")
-                    }
-
-            if (src.isNotBlank()) {
-
+            if (
+                src.isNotBlank() &&
+                src != "about:blank"
+            ) {
                 players.add(src)
             }
         }
@@ -172,20 +140,37 @@ class tubepelis : MainAPI() {
         var found = false
 
         players.distinct().forEach { player ->
-
             try {
-
                 println("PLAYER => $player")
 
-                // ====================================================
-                // reproductor.php
-                // ====================================================
+                if (player.contains("reproductor.php")) {
 
-                if (
-                    player.contains(
-                        "reproductor.php"
-                    )
-                ) {
+                    val vParam = Regex("""[?&]v=([^&]+)""")
+                        .find(player)
+                        ?.groupValues
+                        ?.getOrNull(1)
+
+                    if (vParam != null) {
+                        val decodedParam = URLDecoder.decode(vParam, "UTF-8")
+
+                        val decoded = String(
+                            Base64.decode(
+                                decodedParam,
+                                Base64.DEFAULT
+                            )
+                        ).trim()
+
+                        println("REPRODUCTOR V DECODED => $decoded")
+
+                        found = resolvePlayer(
+                            decoded,
+                            data,
+                            subtitleCallback,
+                            callback
+                        ) || found
+
+                        return@forEach
+                    }
 
                     val html = app.get(
                         player,
@@ -197,20 +182,13 @@ class tubepelis : MainAPI() {
 
                     println("PLAYER HTML => $html")
 
-                    // ====================================================
-                    // BASE64 PLAYER
-                    // ====================================================
-
                     val encoded =
-                        Regex(
-                            """_0x\s*=\s*"([^"]+)""""
-                        )
+                        Regex("""_0x\s*=\s*"([^"]+)"""")
                             .find(html)
                             ?.groupValues
                             ?.getOrNull(1)
 
                     if (encoded != null) {
-
                         println("ENCODED => $encoded")
 
                         val decoded =
@@ -219,108 +197,29 @@ class tubepelis : MainAPI() {
                                     encoded,
                                     Base64.DEFAULT
                                 )
-                            )
+                            ).trim()
 
                         println("DECODED => $decoded")
 
-                        // ====================================================
-                        // FILEMOON RESOLVER
-                        // ====================================================
-
-                        if (
-                            FilemoonResolver
-                                .isFilemoon(decoded)
-                        ) {
-
-                            println(
-                                "FILEMOON DETECTED"
-                            )
-
-                            val ok =
-                                FilemoonResolver.resolve(
-                                    decoded,
-                                    data,
-                                    subtitleCallback,
-                                    callback
-                                )
-
-                            if (ok) {
-
-                                found = true
-                            }
-
-                        } else {
-
-                            println(
-                                "LOAD EXTRACTOR => $decoded"
-                            )
-
-                            loadExtractor(
-                                decoded,
-                                data,
-                                subtitleCallback
-                            ) {
-
-                                found = true
-
-                                callback(it)
-                            }
-                        }
+                        found = resolvePlayer(
+                            decoded,
+                            data,
+                            subtitleCallback,
+                            callback
+                        ) || found
                     }
 
                 } else {
-
-                    // ====================================================
-                    // DIRECT PLAYER
-                    // ====================================================
-
-                    if (
-                        FilemoonResolver
-                            .isFilemoon(player)
-                    ) {
-
-                        println(
-                            "DIRECT FILEMOON"
-                        )
-
-                        val ok =
-                            FilemoonResolver.resolve(
-                                player,
-                                data,
-                                subtitleCallback,
-                                callback
-                            )
-
-                        if (ok) {
-
-                            found = true
-                        }
-
-                    } else {
-
-                        println(
-                            "DIRECT EXTRACTOR => $player"
-                        )
-
-                        loadExtractor(
-                            player,
-                            data,
-                            subtitleCallback
-                        ) {
-
-                            found = true
-
-                            callback(it)
-                        }
-                    }
+                    found = resolvePlayer(
+                        player,
+                        data,
+                        subtitleCallback,
+                        callback
+                    ) || found
                 }
 
             } catch (e: Exception) {
-
-                println(
-                    "LOADLINKS ERROR => ${e.message}"
-                )
-
+                println("LOADLINKS ERROR => ${e.message}")
                 e.printStackTrace()
             }
         }
@@ -328,18 +227,93 @@ class tubepelis : MainAPI() {
         return found
     }
 
-    // ============================================================
-    // PARSER
-    // ============================================================
+    private suspend fun resolvePlayer(
+        player: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+
+        val fixed = player
+            .replace("\\/", "/")
+            .replace("&amp;", "&")
+            .trim()
+
+        if (fixed.isBlank()) return false
+
+        try {
+            when {
+                FilemoonResolver.isFilemoon(fixed) -> {
+                    println("FILEMOON DETECTED => $fixed")
+
+                    val ok = FilemoonResolver.resolve(
+                        fixed,
+                        referer,
+                        subtitleCallback,
+                        callback
+                    )
+
+                    if (ok) found = true
+                }
+
+                fixed.contains("playmogo", true) ||
+                        fixed.contains("dood", true) ||
+                        fixed.contains("ds2play", true) ||
+                        fixed.contains("ds2video", true) ||
+                        fixed.contains("d0000d", true) ||
+                        fixed.contains("d000d", true) ||
+                        fixed.contains("vide0.net", true) ||
+                        fixed.contains("myvidplay", true) -> {
+
+                    println("DOOD DETECTED => $fixed")
+
+                    DoodLaExtractor().getUrl(
+                        fixed,
+                        referer,
+                        subtitleCallback
+                    ) {
+                        found = true
+                        callback(it)
+                    }
+                }
+
+                else -> {
+                    println("LOAD EXTRACTOR => $fixed")
+
+                    loadExtractor(
+                        fixed,
+                        referer,
+                        subtitleCallback
+                    ) {
+                        found = true
+                        callback(it)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            println("RESOLVE PLAYER ERROR => ${e.message}")
+
+            try {
+                loadExtractor(
+                    fixed,
+                    referer,
+                    subtitleCallback
+                ) {
+                    found = true
+                    callback(it)
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        return found
+    }
 
     private fun Element.toSearchResult(): SearchResponse? {
+        val a = selectFirst("a") ?: return null
 
-        val a =
-            selectFirst("a")
-                ?: return null
-
-        val href =
-            a.attr("abs:href")
+        val href = a.attr("abs:href")
 
         if (href.isBlank()) {
             return null
@@ -348,11 +322,8 @@ class tubepelis : MainAPI() {
         val title =
             a.attr("title")
                 .ifBlank {
-
-                    selectFirst("img")
-                        ?.attr("alt")
+                    selectFirst("img")?.attr("alt")
                 }
-
                 ?: return null
 
         val poster =
@@ -364,7 +335,6 @@ class tubepelis : MainAPI() {
             href,
             TvType.Movie
         ) {
-
             this.posterUrl = poster
         }
     }

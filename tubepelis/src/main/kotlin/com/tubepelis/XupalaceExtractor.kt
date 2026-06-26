@@ -1,6 +1,6 @@
 package com.tubepelis
 
-import com.tubepelis.DoodExtractor
+import com.tubepelis.DoodLaExtractor
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -95,7 +95,7 @@ class XupalaceExtractor : ExtractorApi() {
                 try {
                     when {
                         embed.contains("dood") -> {
-                            DoodExtractor().getUrl(embed, safeUrl, subtitleCallback, callback)
+                            DoodLaExtractor().getUrl(embed, safeUrl, subtitleCallback, callback)
                             found = true
                         }
 
