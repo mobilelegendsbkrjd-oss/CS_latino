@@ -70,7 +70,7 @@ class megadede : MainAPI() {
             }
         }
 
-        return HomePageResponse(
+        return newHomePageResponse(
             listOf(HomePageList(request.name, items))
         )
     }
@@ -198,47 +198,104 @@ class megadede : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data).document
+        val doc = app.get(
+            data,
+            referer = mainUrl,
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+                "Referer" to mainUrl
+            )
+        ).document
+
         var found = false
 
-        suspend fun handle(url: String) {
-            val finalUrl = if (url.startsWith("//")) "https:$url" else url
+        fun fixUrlLocal(raw: String): String {
+            val clean = raw.trim()
+                .replace("\\/", "/")
+                .replace("&amp;", "&")
+
+            return when {
+                clean.startsWith("//") -> "https:$clean"
+                clean.startsWith("http") -> clean
+                clean.startsWith("/") -> mainUrl.removeSuffix("/") + clean
+                else -> data.substringBeforeLast("/") + "/" + clean
+            }
+        }
+
+        suspend fun handle(rawUrl: String) {
+            if (rawUrl.isBlank()) return
+
+            val finalUrl = fixUrlLocal(rawUrl)
 
             when {
-                finalUrl.contains("embed69", true) ->
-                    Embed69Extractor.load(finalUrl, mainUrl, subtitleCallback, callback)
+                finalUrl.contains("xupalace.org", true) -> {
+                    XupalaceExtractor().getUrl(
+                        url = finalUrl,
+                        referer = data,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback
+                    )
+                    found = true
+                }
+
+                finalUrl.contains("/vidurl/", true) ||
+                        finalUrl.contains("embed69", true) -> {
+                    Embed69Extractor.load(
+                        url = finalUrl,
+                        referer = data,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback
+                    )
+                    found = true
+                }
 
                 else -> {
-                    // Especificar preferencias de idioma de forma segura
-                    try {
-                        // Intento con preferencias LAT
-                        loadExtractor(
-                            url = finalUrl,
-                            referer = mainUrl,
-                            subtitleCallback = subtitleCallback,
-                            callback = callback,
-                            subtitleAllowed = true,
-                            qualifiers = mapOf("preferAudio" to "es")
-                        )
-                    } catch (e: Exception) {
-                        // Si falla, intentamos sin qualifiers
-                        loadExtractor(finalUrl, mainUrl, subtitleCallback, callback)
-                    }
+                    val ok = loadExtractor(
+                        finalUrl,
+                        data,
+                        subtitleCallback,
+                        callback
+                    )
+
+                    if (ok) found = true
                 }
             }
-            found = true
         }
 
-        // Buscar iframes en la página del episodio
-        doc.select("iframe").forEach {
-            val src = it.attr("src")
-            if (src.isNotBlank()) handle(src)
+        // iframe principal:
+        // <iframe id="player" src="https://xupalace.org/video/tt0898266-1x01/">
+        doc.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src")
+                .ifBlank { iframe.attr("data-src") }
+                .trim()
+
+            if (src.isNotBlank() && !src.startsWith("blob:", true)) {
+                handle(src)
+            }
         }
 
-        // También buscar enlaces de video directos si hay
-        doc.select("video source").forEach {
-            val src = it.attr("src")
-            if (src.isNotBlank()) handle(src)
+        // botones Megadede:
+        // changeServer('/vidurl/...')
+        doc.select("button.server-btn").forEach { btn ->
+            val onclick = btn.attr("onclick")
+
+            val serverUrl = Regex("""changeServer\(['"]([^'"]+)['"]""")
+                .find(onclick)
+                ?.groupValues
+                ?.getOrNull(1)
+
+            if (!serverUrl.isNullOrBlank()) {
+                handle(serverUrl)
+            }
+        }
+
+        // directos por si aparecen
+        doc.select("video source").forEach { source ->
+            val src = source.attr("src").trim()
+
+            if (src.isNotBlank() && !src.startsWith("blob:", true)) {
+                handle(src)
+            }
         }
 
         return found

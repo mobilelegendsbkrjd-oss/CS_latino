@@ -7,5 +7,6 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class VerPeliculasOnlinePlugin : Plugin() {
     override fun load() {
         registerMainAPI(VerPeliculasOnline())
+        registerExtractorAPI(DoodLaExtractor())
     }
 }

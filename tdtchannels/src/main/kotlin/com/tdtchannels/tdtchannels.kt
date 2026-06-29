@@ -2,262 +2,204 @@ package com.tdtchannels
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.serialization.*
-import kotlinx.serialization.json.Json
+import java.net.URLEncoder
 
 class TDTChannels : MainAPI() {
-
-    override var mainUrl = "https://www.tdtchannels.com"
+    override var mainUrl = "https://play.tdtchannels.com"
     override var name = "TDTChannels"
     override var lang = "es"
-
     override val supportedTypes = setOf(TvType.Live)
-
     override val hasMainPage = true
 
     override val mainPage = mainPageOf(
-        "$mainUrl/lists/tv.json" to "📺 TV España + Internacional",
-        "$mainUrl/lists/radio.json" to "📻 Radio"
+        "$mainUrl/television" to "📺 TV - Todas",
+        "$mainUrl/radio" to "📻 Radio - Todas"
     )
 
-    // =============================
-    // JSON MODELS
-    // =============================
-
-    @Serializable
-    data class RootData(
-        val countries: List<Country>? = null
+    data class ChannelItem(
+        val name: String,
+        val logo: String?,
+        val slug: String,
+        val category: String
     )
 
-    @Serializable
-    data class Country(
-        val name: String? = null,
-        val ambits: List<Ambit>? = null,
-        val channels: List<Channel>? = null
-    )
-
-    @Serializable
-    data class Ambit(
-        val name: String? = null,
-        val channels: List<Channel>? = null
-    )
-
-    @Serializable
-    data class Channel(
-        val name: String? = null,
-        val logo: String? = null,
-        val options: List<Option>? = null
-    )
-
-    @Serializable
-    data class Option(
-        val format: String? = null,
-        val url: String? = null
-    )
-
-    @Serializable
-    data class EpgRoot(
-        val channels: Map<String, List<EpgProgram>>? = null
-    )
-
-    @Serializable
-    data class EpgProgram(
-        val hi: Long? = null,
-        val hf: Long? = null,
-        val t: String? = null,
-        val d: String? = null
-    )
-
-    private val json = Json { ignoreUnknownKeys = true }
-
-    // =============================
-    // CHANNEL FETCH
-    // =============================
-
-    private suspend fun getAllChannels(jsonUrl: String): List<Triple<String, String?, String?>> {
-
-        val response = app.get(jsonUrl, cacheTime = 3600)
-
-        val root: RootData? = try {
-            json.decodeFromString(response.text)
-        } catch (_: Exception) {
-            null
-        }
-
-        val list = mutableListOf<Triple<String, String?, String?>>()
-
-        root?.countries?.forEach { country ->
-
-            country.ambits?.forEach { ambit ->
-                ambit.channels?.forEach { channel ->
-                    processChannel(channel, list)
-                }
-            }
-
-            country.channels?.forEach { channel ->
-                processChannel(channel, list)
-            }
-        }
-
-        return list.distinctBy { it.first }
+    private fun cleanHtml(html: String): String {
+        return html
+            .replace("\\\"", "\"")
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+            .replace("&amp;", "&")
+            .replace("\\n", "")
+            .replace("\\t", "")
     }
 
-    private fun processChannel(
-        channel: Channel,
-        list: MutableList<Triple<String, String?, String?>>
-    ) {
+    private fun enc(value: String): String {
+        return URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+    }
 
-        val title = channel.name?.trim() ?: return
+    private fun parseChannels(html: String): List<ChannelItem> {
+        val clean = cleanHtml(html)
+        val out = mutableListOf<ChannelItem>()
 
-        val bestOption = channel.options
-            ?.filter { it.url?.startsWith("http") == true }
-            ?.maxByOrNull {
+        val regex = Regex(
+            """"canonicalSlug":"[^"]*","category":"([^"]*)","legacySlug":"([^"]*)","logo":"([^"]*)","name":"([^"]*)","slug":"([^"]*)""""
+        )
 
-                when (it.format?.lowercase()) {
+        regex.findAll(clean).forEach { m ->
+            val category = m.groupValues[1].ifBlank { "Otros" }
+            val legacySlug = m.groupValues[2]
+            val logo = m.groupValues[3]
+            val name = m.groupValues[4]
+            val slug = m.groupValues[5].ifBlank { legacySlug }
 
-                    "m3u8", "hls" -> 10
-                    "youtube" -> 5
-                    else -> 1
-                }
+            if (name.isNotBlank() && slug.isNotBlank()) {
+                out.add(ChannelItem(name, logo, slug, category))
             }
+        }
 
-        bestOption?.url?.let {
+        return out.distinctBy { it.slug }
+    }
 
-            list.add(
-                Triple(
-                    title,
-                    channel.logo,
-                    it
-                )
+    private fun groupTitle(category: String): String {
+        return when {
+            category.equals("Generalistas", true) -> "🇪🇸 Generalistas"
+            category.equals("Informativos", true) -> "📰 Informativos"
+            category.equals("Deportivos", true) -> "⚽ Deportivos"
+            category.equals("Infantiles", true) -> "🧸 Infantiles"
+            category.equals("Eventuales", true) -> "🔴 Eventuales"
+            category.equals("Streaming", true) -> "🎮 Streaming"
+            category.equals("Musicales", true) -> "🎵 Musicales"
+            category.equals("Religiosos", true) -> "⛪ Religiosos"
+            category.startsWith("Int. América", true) -> "🌎 Internacional - América"
+            category.startsWith("Int. Europa", true) -> "🌍 Internacional - Europa"
+            category.startsWith("Int. Asia", true) -> "🌏 Internacional - Asia"
+            category.startsWith("Int. África", true) -> "🌍 Internacional - África"
+            category.startsWith("Int.", true) -> "🌐 Internacional - Otros"
+            category.contains("Deportivos Int.", true) -> "🏆 Deportes Internacionales"
+            else -> "🇪🇸 España - $category"
+        }
+    }
+
+    private fun channelResponse(ch: ChannelItem, base: String): SearchResponse {
+        return newMovieSearchResponse(
+            ch.name,
+            "$base/${enc(ch.slug)}",
+            TvType.Live
+        ) {
+            posterUrl = ch.logo
+        }
+    }
+
+    private fun extractStream(html: String): String? {
+        val clean = cleanHtml(html)
+
+        Regex(
+            """"title":"[^"]*","url":"(https?://[^"]+?\.m3u8[^"]*)""""
+        ).find(clean)?.groupValues?.getOrNull(1)?.let {
+            return it
+        }
+
+        Regex(
+            """(https?://[^"'\\]+?\.m3u8[^"'\\]*)"""
+        ).find(clean)?.groupValues?.getOrNull(1)?.let {
+            return it
+        }
+
+        return null
+    }
+
+    private fun extractTitle(html: String): String {
+        val clean = cleanHtml(html)
+
+        return Regex(""""selectedChannel":\{.*?"name":"([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
+            .find(clean)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: Regex("""<title>(.*?)\s*\|""")
+                .find(clean)
+                ?.groupValues
+                ?.getOrNull(1)
+            ?: "Canal en Vivo"
+    }
+
+    private fun extractLogo(html: String): String? {
+        val clean = cleanHtml(html)
+
+        return Regex(""""selectedChannel":\{.*?"logo":"([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
+            .find(clean)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: Regex("""property="og:image"\s+content="([^"]+)"""")
+                .find(clean)
+                ?.groupValues
+                ?.getOrNull(1)
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val html = app.get(
+            request.data,
+            headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to mainUrl
             )
-        }
-    }
+        ).text
 
-    // =============================
-    // EPG
-    // =============================
+        val channels = parseChannels(html)
+        val base = if (request.data.contains("/radio")) "$mainUrl/radio" else "$mainUrl/television"
 
-    private suspend fun getCurrentEpg(channelTitle: String?): String? {
-
-        if (channelTitle.isNullOrBlank()) return null
-
-        val epgResp = app.get(
-            "$mainUrl/epg/TV.json",
-            cacheTime = 1800
-        )
-
-        val epg: EpgRoot? = try {
-            json.decodeFromString(epgResp.text)
-        } catch (_: Exception) {
-            null
-        }
-
-        val now = System.currentTimeMillis() / 1000
-
-        val matchingKey = epg?.channels?.keys?.find {
-            it.lowercase().contains(channelTitle.lowercase())
-        } ?: return null
-
-        val programs = epg.channels[matchingKey] ?: return null
-
-        val current = programs.find {
-
-            val start = it.hi ?: 0
-            val end = it.hf ?: 0
-
-            start <= now && end > now
-        }
-
-        return current?.let {
-
-            val title = it.t ?: "Programa actual"
-            val desc = it.d?.take(100) ?: ""
-
-            "$title - $desc"
-        }
-    }
-
-    // =============================
-    // MAIN PAGE
-    // =============================
-
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
-
-        val channels = getAllChannels(request.data)
-
-        val items = channels.map {
-
-            val (title, logo, url) = it
-
-            val data = "$title||$url"
-
-            newLiveSearchResponse(title, data) {
-                posterUrl = logo
+        val lists = channels
+            .groupBy { groupTitle(it.category) }
+            .map { group ->
+                HomePageList(
+                    group.key,
+                    group.value.map { channelResponse(it, base) }
+                )
             }
-        }
 
-        return newHomePageResponse(
-            HomePageList(request.name, items)
-        )
+        return newHomePageResponse(lists, false)
     }
-
-    // =============================
-    // SEARCH
-    // =============================
 
     override suspend fun search(query: String): List<SearchResponse> {
-
         val q = query.lowercase().trim()
-
         if (q.length < 2) return emptyList()
 
-        val tvChannels = getAllChannels("$mainUrl/lists/tv.json")
-        val radioChannels = getAllChannels("$mainUrl/lists/radio.json")
+        val tvHtml = app.get("$mainUrl/television").text
+        val radioHtml = app.get("$mainUrl/radio").text
 
-        return (tvChannels + radioChannels)
-            .filter { it.first.lowercase().contains(q) }
-            .map {
+        val tv = parseChannels(tvHtml).map { it to "$mainUrl/television" }
+        val radio = parseChannels(radioHtml).map { it to "$mainUrl/radio" }
 
-                val (title, logo, url) = it
-
-                val data = "$title||$url"
-
-                newLiveSearchResponse(title, data) {
-                    posterUrl = logo
-                }
+        return (tv + radio)
+            .filter { it.first.name.lowercase().contains(q) || it.first.category.lowercase().contains(q) }
+            .map { pair ->
+                channelResponse(pair.first, pair.second)
             }
     }
 
-    // =============================
-    // LOAD
-    // =============================
-
     override suspend fun load(url: String): LoadResponse {
+        val html = app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to mainUrl
+            )
+        ).text
 
-        val parts = url.split("||")
-
-        val channelName = parts[0]
-        val streamUrl = parts[1]
-
-        val epg = getCurrentEpg(channelName)
+        val title = extractTitle(html)
+        val poster = extractLogo(html)
+        val stream = extractStream(html) ?: throw ErrorLoadingException("No se encontró m3u8")
 
         return newMovieLoadResponse(
-            name = channelName,
-            url = streamUrl,
-            type = TvType.Live,
-            dataUrl = streamUrl
+            title,
+            url,
+            TvType.Live,
+            stream
         ) {
-
-            plot = "Transmisión legal vía TDTChannels\n$epg"
+            posterUrl = poster
+            backgroundPosterUrl = poster
+            plot = "Transmisión legal vía TDTChannels."
         }
     }
-
-    // =============================
-    // STREAM
-    // =============================
 
     override suspend fun loadLinks(
         data: String,
@@ -265,22 +207,19 @@ class TDTChannels : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
-        val isM3u8 = data.contains(".m3u8")
-        val isDash = data.contains(".mpd")
-
         callback.invoke(
             newExtractorLink(
                 source = name,
                 name = "Direct Stream",
-                url = data
+                url = data,
+                type = INFER_TYPE
             ) {
-                referer = "https://play.tdtchannels.com/"
+                referer = mainUrl
                 quality = Qualities.Unknown.value
                 headers = mapOf(
                     "User-Agent" to USER_AGENT,
-                    "Referer" to "https://play.tdtchannels.com/",
-                    "Origin" to "https://play.tdtchannels.com"
+                    "Referer" to mainUrl,
+                    "Origin" to mainUrl
                 )
             }
         )

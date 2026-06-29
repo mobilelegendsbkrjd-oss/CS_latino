@@ -2,15 +2,18 @@ package com.sololatino
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.*
+import kotlin.random.Random
 
 class DoodExtractor : ExtractorApi() {
 
     override val name = "Dood"
-    override val mainUrl = "https://dood.la"
-    override val requiresReferer = true
+
+    override val mainUrl =
+        "https://dood.la"
+
+    override val requiresReferer =
+        true
 
     override suspend fun getUrl(
         url: String,
@@ -19,54 +22,92 @@ class DoodExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
 
-        println("[Dood] Procesando: $url")
-
         try {
+
             val safeUrl = url
                 .replace("/d/", "/e/")
-                .replace("doodstream.com", "dood.la")
+                .replace(
+                    "doodstream.com",
+                    "dood.la"
+                )
 
-            val response = app.get(safeUrl, referer = referer ?: mainUrl)
+            val response = app.get(
+                safeUrl,
+                referer = referer
+            )
+
             val html = response.text
 
-            val serverUrls = mutableListOf<String>()
+            // =========================
+            // PLAYER URL
+            // =========================
+            val md5Match = Regex(
+                """\/pass_md5\/[^"]+"""
+            )
+                .find(html)
+                ?.value
+                ?: return
 
-            // 🔥 Buscar pass_md5 (clave real de dood)
-            val md5Match = Regex("""/pass_md5/[^'"]+""").find(html)
+            val base =
+                safeUrl.substringBefore(
+                    "/e/"
+                )
 
-            if (md5Match != null) {
-                val base = Regex("""https://[^/]+""")
-                    .find(response.url.toString())
-                    ?.value ?: mainUrl
+            val md5Url =
+                "$base$md5Match"
 
-                val md5Url = base + md5Match.value
+            val token = Regex(
+                """token=([a-zA-Z0-9]+)"""
+            )
+                .find(html)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: ""
 
-                println("[Dood] md5Url: $md5Url")
+            val prefix = app.get(
+                md5Url,
+                referer = safeUrl,
+                headers = mapOf(
+                    "X-Requested-With" to
+                            "XMLHttpRequest"
+                )
+            ).text.trim()
 
-                val prefix = app.get(md5Url, referer = safeUrl).text
-                val token = md5Url.substringAfterLast("/")
+            val finalUrl =
+                prefix +
+                        randomString(10) +
+                        "?token=$token"
 
-                val finalUrl = prefix + randomString(10) + "?token=$token"
+            callback.invoke(
+                newExtractorLink(
+                    name,
+                    name,
+                    finalUrl
+                ) {
+                    this.referer = safeUrl
+                    this.quality = Qualities.Unknown.value
+                    this.type =
+                        ExtractorLinkType.VIDEO
+                }
+            )
 
-                println("[Dood] final: $finalUrl")
-
-                // 🔥 mismo estilo que xupalace: usar loadExtractor
-                loadExtractor(finalUrl, safeUrl, subtitleCallback, callback)
-                return
-            }
-
-            // 🔥 fallback si no encuentra md5
-            println("[Dood] fallback a loadExtractor")
-            loadExtractor(safeUrl, referer, subtitleCallback, callback)
-
-        } catch (e: Exception) {
-            println("[Dood] ERROR: ${e.message}")
-            loadExtractor(url, referer, subtitleCallback, callback)
-        }
+        } catch (_: Exception) {}
     }
 
-    private fun randomString(length: Int): String {
-        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        return (1..length).map { chars.random() }.joinToString("")
+    // =========================
+    // RANDOM STRING
+    // =========================
+    private fun randomString(
+        length: Int
+    ): String {
+
+        val chars =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+        return (1..length)
+            .map {
+                chars.random(Random)
+            }
+            .joinToString("")
     }
 }

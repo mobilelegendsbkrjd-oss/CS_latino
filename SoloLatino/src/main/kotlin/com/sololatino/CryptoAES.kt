@@ -7,32 +7,87 @@ import javax.crypto.spec.SecretKeySpec
 
 object CryptoAES {
 
-    fun decrypt(data: String, key: String): String? {
+    fun decrypt(
+        data: String,
+        key: String
+    ): String? {
+
         return try {
-            val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
-            val secretKey = SecretKeySpec(key.toByteArray(), "AES")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey)
-            val decoded = Base64.decode(data, Base64.DEFAULT)
-            String(cipher.doFinal(decoded))
-        } catch (e: Exception) {
+
+            val cipher = Cipher.getInstance(
+                "AES/ECB/PKCS5Padding"
+            )
+
+            val secretKey = SecretKeySpec(
+                key.toByteArray(Charsets.UTF_8),
+                "AES"
+            )
+
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                secretKey
+            )
+
+            val decoded = Base64.decode(
+                data,
+                Base64.DEFAULT
+            )
+
+            String(
+                cipher.doFinal(decoded),
+                Charsets.UTF_8
+            )
+
+        } catch (_: Exception) {
             null
         }
     }
 
-    fun decryptCbcIV(data: String, key: String): String? {
+    fun decryptCbcIV(
+        data: String,
+        key: String
+    ): String? {
+
         return try {
-            val decoded = Base64.decode(data, Base64.DEFAULT)
 
-            val iv = decoded.copyOfRange(0, 16)
-            val content = decoded.copyOfRange(16, decoded.size)
+            val decoded = Base64.decode(
+                data,
+                Base64.DEFAULT
+            )
 
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            val secretKey = SecretKeySpec(key.toByteArray(), "AES")
+            val iv = decoded.copyOfRange(
+                0,
+                16
+            )
+
+            val content = decoded.copyOfRange(
+                16,
+                decoded.size
+            )
+
+            val cipher = Cipher.getInstance(
+                "AES/CBC/PKCS5Padding"
+            )
+
+            val secretKey = SecretKeySpec(
+                key.toByteArray(Charsets.UTF_8),
+                "AES"
+            )
+
             val ivSpec = IvParameterSpec(iv)
 
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
-            String(cipher.doFinal(content))
-        } catch (e: Exception) {
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                secretKey,
+                ivSpec
+            )
+
+            String(
+                cipher.doFinal(content),
+                Charsets.UTF_8
+            )
+
+        } catch (_: Exception) {
             null
         }
     }
