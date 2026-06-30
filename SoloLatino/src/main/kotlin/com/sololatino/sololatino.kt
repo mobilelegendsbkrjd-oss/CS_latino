@@ -258,7 +258,6 @@ class SoloLatino : MainAPI() {
         var isAnime = url.contains("/anime/") || url.contains("/animes/")
         val isSeries = url.contains("/serie/")
 
-
         val title = doc.selectFirst("h1")?.text()?.trim() ?: "Sin título"
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst("meta[name=description]")?.attr("content") ?: ""
