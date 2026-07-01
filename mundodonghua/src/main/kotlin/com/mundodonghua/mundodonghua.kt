@@ -114,14 +114,35 @@ class MundoDonghua : MainAPI() {
         val relatedUrls = mutableListOf<String>()
         relatedUrls.add("$mainUrl/donghua/$baseSlug")
 
-        for (i in 2..12) {
+        try {
+            val searchDoc = app.get(
+                "$mainUrl/busquedas/${baseSlug.replace("-", "+")}",
+                timeout = 120,
+                headers = siteHeaders
+            ).document
+
+            val foundUrls = parseCards(searchDoc)
+                .map { it.url }
+                .filter { it.contains("/donghua/") }
+                .filter {
+                    val s = it.substringAfter("/donghua/").substringBefore("?").trim('/')
+                    normalizeSeasonBaseSlug(s) == baseSlug
+                }
+
+            relatedUrls.addAll(foundUrls)
+        } catch (_: Exception) {
+        }
+
+        for (i in 2..6) {
             relatedUrls.add("$mainUrl/donghua/$baseSlug-$i")
             relatedUrls.add("$mainUrl/donghua/$baseSlug-$i-sp")
         }
 
+        val finalRelatedUrls = relatedUrls.distinct()
+
         val allEpisodes = mutableListOf<Episode>()
 
-        relatedUrls.distinct().forEach { seasonUrl ->
+        finalRelatedUrls.forEach { seasonUrl ->
             try {
                 val seasonDoc = app.get(seasonUrl, timeout = 120, headers = siteHeaders).document
 
