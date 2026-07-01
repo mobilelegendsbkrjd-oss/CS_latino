@@ -60,7 +60,7 @@ class MundoDonghua : MainAPI() {
             }
         }
 
-        return out.distinctBy { it.url }
+        return out.distinctBy { responseBaseKey(it.url) }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -467,6 +467,8 @@ class MundoDonghua : MainAPI() {
     }
 
     private fun parseCards(element: Element): List<SearchResponse> {
+        val seen = mutableSetOf<String>()
+
         return element.select("div.md-card, div.item, li.md-episode-item, a[href*=/donghua/], a[href*=/ver/], .col-xs-4")
             .mapNotNull { card ->
                 val a = if (card.tagName() == "a") card else card.selectFirst("a[href]")
@@ -474,6 +476,16 @@ class MundoDonghua : MainAPI() {
 
                 val href = fixUrl(a.attr("abs:href").ifBlank { a.attr("href") })
                 if (!href.contains("/donghua/") && !href.contains("/ver/")) return@mapNotNull null
+
+                val seriesUrl = if (href.contains("/ver/")) {
+                    val slug = href.substringAfter("/ver/").substringBefore("/")
+                    "$mainUrl/donghua/$slug"
+                } else {
+                    href
+                }
+
+                val baseKey = responseBaseKey(seriesUrl)
+                if (!seen.add(baseKey)) return@mapNotNull null
 
                 val img = card.selectFirst("img") ?: a.selectFirst("img")
                 val poster = fixUrlNull(img?.imgAttr())
@@ -485,13 +497,6 @@ class MundoDonghua : MainAPI() {
 
                 val title = cleanTitle(rawTitle)
                 if (title.isBlank()) return@mapNotNull null
-
-                val seriesUrl = if (href.contains("/ver/")) {
-                    val slug = href.substringAfter("/ver/").substringBefore("/")
-                    "$mainUrl/donghua/$slug"
-                } else {
-                    href
-                }
 
                 newAnimeSearchResponse(title, seriesUrl, TvType.Anime) {
                     posterUrl = poster
@@ -505,6 +510,14 @@ class MundoDonghua : MainAPI() {
                 }
             }
             .filter { it.name.isNotBlank() }
+    }
+
+    private fun responseBaseKey(url: String): String {
+        val slug = url.substringAfter("/donghua/")
+            .substringBefore("?")
+            .trim('/')
+
+        return normalizeSeasonBaseSlug(slug)
     }
 
     private fun Element.imgAttr(): String {
