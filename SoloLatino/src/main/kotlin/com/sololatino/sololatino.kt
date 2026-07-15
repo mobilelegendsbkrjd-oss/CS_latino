@@ -10,6 +10,9 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import org.json.JSONArray
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class SoloLatino : MainAPI() {
     override var mainUrl = "https://sololatino.net"
@@ -43,6 +46,7 @@ class SoloLatino : MainAPI() {
     )
 
     private val sagasJson = "https://raw.githubusercontent.com/mobilelegendsbkrjd-oss/lat_cs_bkrjd/main/sagas.json"
+    private var sagasCache: List<SagaItem>? = null
 
     // ====================== PARSE CARDS ======================
     private fun parseCards(element: org.jsoup.nodes.Element): List<SearchResponse> {
@@ -85,21 +89,62 @@ class SoloLatino : MainAPI() {
         }
     }
 
+    // ====================== RECOMMENDATIONS ======================
+    private fun getRecommendations(doc: org.jsoup.nodes.Document): List<SearchResponse> {
+
+        // Buscar la sección "Relacionadas"
+        val relatedSection = doc.selectFirst("h2:matchesOwn((?i)Relacionadas)")
+            ?.parent()
+            ?: return emptyList()
+
+        // Obtener únicamente las cards de esa sección
+        val cards = relatedSection.select(".scroll-row .card")
+
+        if (cards.isEmpty()) return emptyList()
+
+        val container = org.jsoup.nodes.Element("div")
+
+        cards.forEach {
+            container.appendChild(it.clone())
+        }
+
+        return parseCards(container)
+            .distinctBy { it.url }
+    }
+
     // ====================== SAGAS ======================
     private suspend fun getSagasRaw(): List<SagaItem> {
+
+        sagasCache?.let {
+            return it
+        }
+
         return try {
+
             val arr = JSONArray(app.get(sagasJson).text)
+
             val out = mutableListOf<SagaItem>()
 
             for (i in 0 until arr.length()) {
+
                 val o = arr.getJSONObject(i)
+
                 val movies = mutableListOf<SagaMovie>()
+
                 val mArr = o.optJSONArray("movies")
 
                 if (mArr != null) {
+
                     for (j in 0 until mArr.length()) {
+
                         val m = mArr.getJSONObject(j)
-                        movies.add(SagaMovie(m.optString("name", null), m.optString("url", null)))
+
+                        movies.add(
+                            SagaMovie(
+                                m.optString("name", null),
+                                m.optString("url", null)
+                            )
+                        )
                     }
                 }
 
@@ -113,9 +158,14 @@ class SoloLatino : MainAPI() {
                 )
             }
 
+            sagasCache = out
+
             out
+
         } catch (_: Exception) {
+
             emptyList()
+
         }
     }
 
@@ -133,70 +183,171 @@ class SoloLatino : MainAPI() {
     }
 
     // ====================== HELPER PARA CATEGORÍAS CON SCROLL INFINITO ======================
-    private suspend fun getCategoryInfinite(title: String, baseUrl: String): HomePageList {
-        val allItems = mutableListOf<SearchResponse>()
+    private suspend fun getCategory(
+        title: String,
+        url: String
+    ): HomePageList {
 
-        // Cargar múltiples páginas hasta tener suficientes items
-        var currentPage = 1
-        var hasMore = true
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept" to "text/html,application/xhtml+xml",
+            "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8",
+            "Referer" to mainUrl
+        )
 
-        while (hasMore && currentPage <= 3) { // Límite de 10 páginas
-            try {
-                val url = if (currentPage == 1) baseUrl else "$baseUrl&page=$currentPage"
+        return try {
 
-                // Añadir headers específicos para evitar 403
-                val headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8",
-                    "Referer" to mainUrl
-                )
+            val doc = app.get(
+                url,
+                headers = headers
+            ).document
 
-                val doc = app.get(url, headers = headers).document
-                val items = parseCards(doc)
+            HomePageList(
+                title,
+                parseCards(doc)
+                    .distinctBy { it.url }
+            )
 
-                if (items.isEmpty()) {
-                    hasMore = false
-                    Log.e(name, "No items found in page $currentPage for $title")
-                } else {
-                    allItems.addAll(items)
-                    Log.e(name, "Loaded ${items.size} items from page $currentPage for $title (total: ${allItems.size})")
-                    currentPage++
-                }
-            } catch (e: Exception) {
-                Log.e(name, "Error loading page $currentPage for $title: ${e.message}")
-                hasMore = false
-            }
+        } catch (e: Exception) {
+
+            Log.e(name, "$title -> ${e.message}")
+
+            HomePageList(
+                title,
+                emptyList()
+            )
         }
-
-        // Invertir el orden para que el scroll D-pad funcione correctamente
-        return HomePageList(title, allItems.distinctBy { it.url }.reversed())
     }
 
     // ====================== MAIN PAGE ======================
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val lists = mutableListOf<HomePageList>()
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse = coroutineScope {
 
-        // Sagas (estático, sin scroll infinito)
-        val sagas = getSagas()
-        if (sagas.isNotEmpty()) {
-            lists.add(HomePageList("🔥 Sagas", sagas.take(20)))
-        }
+        val pageSuffix =
+            if (page == 1)
+                ""
+            else
+                "&page=$page"
 
-        // Categorías con scroll infinito (carga múltiples páginas automáticamente)
-        lists.add(getCategoryInfinite("🎬 Películas Recientes", "$mainUrl/peliculas?año=0&nota=0&sort=updated"))
-        lists.add(getCategoryInfinite("📺 Series Recientes", "$mainUrl/series?año=0&nota=0&sort=updated"))
+        val tasks = listOf(
 
-// Plataformas con scroll infinito (Estilo Premium / Brand-Matched)
-        lists.add(getCategoryInfinite("🔴 Netflix", "$mainUrl/red/netflix?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🔵 Prime Video", "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🍎 Apple TV", "$mainUrl/red/apple-tv?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🏰 DisneyPlus", "$mainUrl/red/disney?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🏮 TVTokyo", "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("🗼 TokyoMX", "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes"))
-        lists.add(getCategoryInfinite("⛩️ Anime", "$mainUrl/animes?año=0&nota=0&sort=updated"))
+            async {
 
-        return newHomePageResponse(lists)
+                val sagas = getSagas()
+
+                if (sagas.isNotEmpty())
+                    HomePageList(
+                        "🔥 Sagas",
+                        sagas.take(20)
+                    )
+                else
+                    null
+            },
+
+            async {
+                getCategory(
+                    "🎬 Películas Recientes",
+                    "$mainUrl/peliculas?año=0&nota=0&sort=updated$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "📺 Series Recientes",
+                    "$mainUrl/series?año=0&nota=0&sort=updated$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🔴 Netflix",
+                    "$mainUrl/red/netflix?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🔵 Prime Video",
+                    "$mainUrl/red/amazon-prime-video?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🍎 Apple TV",
+                    "$mainUrl/red/apple-tv?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🏰 DisneyPlus",
+                    "$mainUrl/red/disney?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🟣 HBO Max",
+                    "$mainUrl/red/hbo-max?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "⚫ HBO",
+                    "$mainUrl/red/hbo?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🟡 AT-X",
+                    "$mainUrl/red/at-x?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🔵 BS11",
+                    "$mainUrl/red/bs11?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🗻 Fuji TV",
+                    "$mainUrl/red/fuji-tv?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🏮 TVTokyo",
+                    "$mainUrl/red/tv-tokyo?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "🗼 TokyoMX",
+                    "$mainUrl/red/tokyo-mx?año=0&nota=0&orden=recientes$pageSuffix"
+                )
+            },
+
+            async {
+                getCategory(
+                    "⛩️ Anime",
+                    "$mainUrl/animes?año=0&nota=0&sort=updated$pageSuffix"
+                )
+            }
+        )
+
+        val lists = tasks.awaitAll().filterNotNull()
+
+        newHomePageResponse(lists)
     }
 
     // ====================== SEARCH ======================
@@ -261,6 +412,7 @@ class SoloLatino : MainAPI() {
         val title = doc.selectFirst("h1")?.text()?.trim() ?: "Sin título"
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst("meta[name=description]")?.attr("content") ?: ""
+        val recommendations = getRecommendations(doc)
 
         // 🔥 CAMBIO 2: Detectar anime por badge ANTES de procesar episodios
         if (isSeries && !isAnime) {
@@ -300,6 +452,7 @@ class SoloLatino : MainAPI() {
             if (episodes.size <= 1 && !isSeries) {
                 val movieUrl = episodes.firstOrNull()?.data ?: url
                 return newMovieLoadResponse(title, url, TvType.AnimeMovie, movieUrl) {
+                    this.recommendations = recommendations
                     this.posterUrl = poster
                     this.plot = plot
                 }
@@ -307,9 +460,15 @@ class SoloLatino : MainAPI() {
 
             // Serie de anime
             return newAnimeLoadResponse(title, url, TvType.Anime) {
+
                 this.posterUrl = poster
                 this.plot = plot
-                addEpisodes(DubStatus.Dubbed, episodes.sortedWith(compareBy({ it.season }, { it.episode })))
+
+                addEpisodes(
+                    DubStatus.Dubbed,
+                    episodes.sortedWith(compareBy({ it.season }, { it.episode }))
+                )
+                this.recommendations = recommendations
             }
         }
 
@@ -318,6 +477,7 @@ class SoloLatino : MainAPI() {
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes.sortedWith(compareBy({ it.season }, { it.episode }))) {
                 this.posterUrl = poster
                 this.plot = plot
+                this.recommendations = recommendations
             }
         }
 
@@ -325,6 +485,7 @@ class SoloLatino : MainAPI() {
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = plot
+            this.recommendations = recommendations
         }
     }
 
