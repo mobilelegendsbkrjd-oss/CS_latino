@@ -5,6 +5,12 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class Latanime : MainAPI() {
     override var mainUrl = "https://latanime.org"
@@ -17,12 +23,12 @@ class Latanime : MainAPI() {
     override val instantLinkLoading = true
 
     override val mainPage = mainPageOf(
+        "emision?p=1" to "En Emisión",
         "animes?fecha=false&genero=false&letra=false&categoria=latino" to "Anime Latino",
         "animes?fecha=false&genero=false&letra=false&categoria=anime" to "Anime",
         "animes?fecha=false&genero=false&letra=false&categoria=Cartoon" to "Cartoons",
         "animes?fecha=false&genero=false&letra=false&categoria=Película%20Latino" to "Película Latino",
         "animes?fecha=false&genero=false&letra=false&categoria=Película" to "Película Subtitulado",
-        "emision?p=1" to "En Emisión",
         "animes?fecha=false&genero=false&letra=false&categoria=ova-latino" to "OVA Latino",
         "animes?fecha=false&genero=false&letra=false&categoria=ova" to "OVA",
         "animes?fecha=false&genero=false&letra=false&categoria=especial" to "Especial"
@@ -71,11 +77,8 @@ class Latanime : MainAPI() {
         val year = Regex("""(19|20)\d{2}""").find(document.text())?.value?.toIntOrNull()
         val background = poster
 
-        val recommendations = document.getAnimeCards()
-            .mapNotNull { it.toSearchResult() }
-            .filter { it.url != url }
-            .distinctBy { it.url }
-            .take(12)
+        val recommendations =
+            document.getRecommendations(url)
 
         val isCartoon = tags.any { it.contains("cartoon", true) }
         val currentSlug = url.substringAfter("/anime/").trimEnd('/')
@@ -104,37 +107,81 @@ class Latanime : MainAPI() {
             .distinct()
             .sortedBy { extractSeasonNumber(it.substringAfter("/anime/").trimEnd('/')) }
 
-        val allEpisodes = mutableListOf<Episode>()
+        val semaphore = Semaphore(3)
 
-        relatedUrls.forEach { animeUrl ->
-            try {
-                val animeDocument = app.get(animeUrl).document
-                val seasonTitle = animeDocument.selectFirst("h2, div.col-lg-9 h2")?.text()?.trim() ?: rawTitle
-                val slug = animeUrl.substringAfter("/anime/").trimEnd('/')
-                val seasonNumber = extractSeasonNumber(slug)
+        val allEpisodes = coroutineScope {
 
-                val episodesRaw = animeDocument.getEpisodeAnchors()
+            relatedUrls.map { animeUrl ->
 
-                val episodes = episodesRaw.mapIndexed { index, element ->
-                    val epUrl = fixUrl(element.attr("href"))
-                    val epName = element.text().trim().ifBlank { "Episodio ${index + 1}" }
-                    val episodeNumber = extractEpisodeNumber(epName) ?: index + 1
+                async(Dispatchers.IO) {
 
-                    newEpisode(epUrl) {
-                        this.name = epName
-                        this.episode = episodeNumber
-                        this.season = seasonNumber
-                        this.posterUrl = fixUrlNull(element.selectFirst("img")?.getImageAttr())
-                        this.description = seasonTitle
+                    semaphore.withPermit {
+
+                        runCatching {
+
+                            val animeDocument = app.get(animeUrl).document
+
+                            val seasonTitle =
+                                animeDocument.selectFirst("h2, div.col-lg-9 h2")
+                                    ?.text()
+                                    ?.trim()
+                                    ?: rawTitle
+
+                            val slug =
+                                animeUrl.substringAfter("/anime/")
+                                    .trimEnd('/')
+
+                            val seasonNumber =
+                                extractSeasonNumber(slug)
+
+                            animeDocument.getEpisodeAnchors()
+                                .mapIndexed { index, element ->
+
+                                    val epUrl =
+                                        fixUrl(element.attr("href"))
+
+                                    val epName =
+                                        element.text()
+                                            .trim()
+                                            .ifBlank { "Episodio ${index + 1}" }
+
+                                    val episodeNumber =
+                                        extractEpisodeNumber(epName)
+                                            ?: index + 1
+
+                                    newEpisode(epUrl) {
+
+                                        name = epName
+
+                                        episode = episodeNumber
+
+                                        season = seasonNumber
+
+                                        posterUrl =
+                                            fixUrlNull(
+                                                element.selectFirst("img")
+                                                    ?.getImageAttr()
+                                            )
+
+                                        description = seasonTitle
+                                    }
+                                }
+
+                        }.getOrElse {
+                            emptyList()
+                        }
+
                     }
+
                 }
 
-                allEpisodes.addAll(episodes)
-            } catch (_: Exception) {
-            }
+            }.awaitAll().flatten()
+
         }
 
-        val finalEpisodes = allEpisodes.distinctBy { it.data }
+        val finalEpisodes = allEpisodes
+            .distinctBy { it.data }
+            .sortedWith(compareBy({ it.season }, { it.episode }))
         val declaredEpisodeCount = extractDeclaredEpisodeCount(document)
         val hasEpisodeSection = document.hasEpisodeSection()
         val isExplicitMovie = rawTitle.contains("pelicula", true) ||
@@ -564,5 +611,47 @@ class Latanime : MainAPI() {
         if (srcset.isNotBlank()) return srcset.substringBefore(" ").trim()
 
         return null
+    }
+    private fun Document.getRecommendations(currentUrl: String): List<SearchResponse> {
+        return select("div.recomendados a[href]")
+            .mapNotNull { element ->
+
+                val href = element.attr("href")
+                    .replace("/ver/", "/anime/")
+                    .substringBefore("-episodio")
+                    .substringBefore("-capitulo")
+
+                if (href.isBlank()) return@mapNotNull null
+
+                val fixedUrl = fixUrl(href)
+
+                if (fixedUrl == currentUrl) return@mapNotNull null
+
+                val title =
+                    element.selectFirst("h5")
+                        ?.text()
+                        ?.trim()
+                        ?: return@mapNotNull null
+
+                val poster =
+                    fixUrlNull(
+                        element.selectFirst("img")
+                            ?.getImageAttr()
+                    )
+
+                val isMovie =
+                    title.contains("pelicula", true) ||
+                            title.contains("película", true) ||
+                            title.contains("movie", true)
+
+                newAnimeSearchResponse(
+                    title,
+                    fixedUrl,
+                    if (isMovie) TvType.AnimeMovie else TvType.Anime
+                ) {
+                    posterUrl = poster
+                }
+            }
+            .distinctBy { it.url }
     }
 }
