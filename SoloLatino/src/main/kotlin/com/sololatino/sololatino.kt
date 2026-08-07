@@ -405,9 +405,7 @@ class SoloLatino : MainAPI() {
 
         val doc = app.get(url).document
 
-        // 🔥 CAMBIO 1: Usar var en lugar de val
-        var isAnime = url.contains("/anime/") || url.contains("/animes/")
-        val isSeries = url.contains("/serie/")
+        val title = doc.selectFirst("h1")?.text()?.trim() ?: "Sin título"
 
         val title = doc.selectFirst("h1")?.text()?.trim() ?: "Sin título"
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
