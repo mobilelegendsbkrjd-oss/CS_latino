@@ -5,10 +5,12 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -261,9 +263,19 @@ class Latanime : MainAPI() {
                     return@forEach
                 }
 
-                val serverName = server.text()
-                    .trim()
-                    .lowercase()
+                val rawServerName = server.text().trim()
+                // Nombre limpio: "Dsvplay", "Voe", "Mp4upload"...
+                val displayServer = formatServerName(rawServerName)
+                // Estilo SoloLatino: LAT[Dsvplay], CAS[Voe], SUB[Mp4upload]
+                // Usa URL + título/tags de la página para no inventar LAT en animes sub
+                val pageHint = document.selectFirst("h2, div.col-lg-9 h2")?.text().orEmpty() +
+                        " " + document.select("a div.btn, div.col-lg-9 a div.btn").text()
+                val langCode = detectLangCode(data, pageHint)
+                val preferredDisplay = if (displayServer.isNotBlank()) {
+                    "$langCode[$displayServer]"
+                } else {
+                    langCode
+                }
 
                 // ===================================================
                 // NUEVO MÉTODO LATANIME
@@ -310,14 +322,7 @@ class Latanime : MainAPI() {
                 // MP4UPLOAD
                 // ===================================================
                 if (resolvedUrl!!.contains("mp4upload", true)) {
-                    val id = Regex("""(?:embed-|/)([A-Za-z0-9]+)""")
-                        .find(resolvedUrl!!)
-                        ?.groupValues
-                        ?.getOrNull(1)
-
-                    if (id != null) {
-                        resolvedUrl = "https://www.mp4upload.com/embed-$id.html"
-                    }
+                    return@forEach
                 }
 
                 // ===================================================
@@ -331,7 +336,7 @@ class Latanime : MainAPI() {
                     callback.invoke(
                         newExtractorLink(
                             source = name,
-                            name = "Pixeldrain",
+                            name = preferredDisplay.ifBlank { "LAT[Pixeldrain]" },
                             url = "https://pixeldrain.com/api/file/$id?download",
                             type = ExtractorLinkType.VIDEO
                         ) {
@@ -348,7 +353,8 @@ class Latanime : MainAPI() {
                     resolvedUrl!!,
                     data,
                     subtitleCallback,
-                    callback
+                    callback,
+                    preferredName = preferredDisplay.ifBlank { null }
                 )
 
                 if (externalFound) {
@@ -360,7 +366,21 @@ class Latanime : MainAPI() {
                         subtitleCallback
                     ) { link ->
                         found = true
-                        callback.invoke(link)
+                        // newExtractorLink es suspend → coroutine (estilo SoloLatino)
+                        CoroutineScope(Dispatchers.IO).launch {
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = link.source,
+                                    name = preferredDisplay.ifBlank { "$langCode[${link.source}]" },
+                                    url = link.url,
+                                    type = link.type
+                                ) {
+                                    this.referer = link.referer
+                                    this.quality = link.quality
+                                    this.headers = link.headers
+                                }
+                            )
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -371,6 +391,9 @@ class Latanime : MainAPI() {
         // ===================================================
         // LINKS DE DESCARGA
         // ===================================================
+        val dlPageHint = document.selectFirst("h2, div.col-lg-9 h2")?.text().orEmpty() +
+                " " + document.select("a div.btn, div.col-lg-9 a div.btn").text()
+        val dlLang = detectLangCode(data, dlPageHint)
         document.select("div.descarga2 div a, a[href*='pixeldrain.com'], a[href*='mp4upload.com']")
             .forEach { dl ->
                 try {
@@ -383,6 +406,14 @@ class Latanime : MainAPI() {
                     }
 
                     val fixedUrl = fixUrl(url)
+                    val dlServer = formatServerName(dl.text().trim()).ifBlank {
+                        when {
+                            fixedUrl.contains("pixeldrain", true) -> "Pixeldrain"
+                            fixedUrl.contains("mp4upload", true) -> "Mp4upload"
+                            else -> "Download"
+                        }
+                    }
+                    val dlName = "$dlLang[$dlServer]"
 
                     if (fixedUrl.contains("pixeldrain.com", true)) {
                         val id = fixedUrl
@@ -392,7 +423,7 @@ class Latanime : MainAPI() {
                         callback.invoke(
                             newExtractorLink(
                                 source = name,
-                                name = "Pixeldrain",
+                                name = dlName,
                                 url = "https://pixeldrain.com/api/file/$id?download",
                                 type = ExtractorLinkType.VIDEO
                             ) {
@@ -409,7 +440,20 @@ class Latanime : MainAPI() {
                             subtitleCallback
                         ) { link ->
                             found = true
-                            callback.invoke(link)
+                            CoroutineScope(Dispatchers.IO).launch {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = link.source,
+                                        name = dlName,
+                                        url = link.url,
+                                        type = link.type
+                                    ) {
+                                        this.referer = link.referer
+                                        this.quality = link.quality
+                                        this.headers = link.headers
+                                    }
+                                )
+                            }
                         }
                     }
                 } catch (_: Exception) {
@@ -612,6 +656,112 @@ class Latanime : MainAPI() {
 
         return null
     }
+    /**
+     * Detecta el código de idioma a partir de la URL (y opcionalmente texto de la página).
+     *
+     * Español Latino / Latino  -> LAT
+     * Castellano / Español     -> CAS
+     * Subtitulado              -> SUB
+     * Dual                     -> DUAL
+     * Sin indicios claros      -> SUB  (en Latanime, sin tag = subtitulado; NO inventar LAT)
+     */
+    private fun detectLangCode(url: String, pageText: String? = null): String {
+        val s = buildString {
+            append(url.lowercase())
+            if (!pageText.isNullOrBlank()) {
+                append(' ')
+                // Solo un pedazo del HTML/título para no escanear toda la página
+                append(pageText.lowercase().take(2000))
+            }
+        }
+
+        return when {
+            // Dual primero
+            "dual" in s -> "DUAL"
+
+            // Latino / Español Latino / doblado
+            "latino" in s ||
+                    "español latino" in s ||
+                    "espanol latino" in s ||
+                    "/lat/" in s ||
+                    "-lat-" in s ||
+                    "-latino" in s ||
+                    "doblado" in s -> "LAT"
+
+            // Castellano / Español (España)
+            "castellano" in s ||
+                    "/cas/" in s ||
+                    "-cas-" in s ||
+                    "-castellano" in s -> "CAS"
+
+            // Subtitulado
+            "subtitulado" in s ||
+                    "subtitulos" in s ||
+                    "subtítulos" in s ||
+                    "/sub/" in s ||
+                    "-sub-" in s ||
+                    Regex("""\bsub\b""").containsMatchIn(s) -> "SUB"
+
+            // Sin indicios en la URL → SUB (no LAT)
+            else -> "SUB"
+        }
+    }
+
+    /**
+     * Convierte el texto crudo del servidor (ej: "dsvplay", "mp4upload", "voe")
+     * en un nombre limpio y profesional para mostrar en la lista de links.
+     * Resultado: "Dsvplay", "Mp4upload", "Voe", etc.
+     */
+    private fun formatServerName(raw: String): String {
+        val cleaned = raw
+            .trim()
+            .lowercase()
+            .replace(Regex("""[^a-z0-9.\-_\s]"""), "")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        if (cleaned.isBlank()) return ""
+
+        // Mapeo de nombres conocidos para que se vean consistentes
+        val known = mapOf(
+            "dsvplay" to "Dsvplay",
+            "dsv" to "Dsvplay",
+            "playmogo" to "Playmogo",
+            "myvidplay" to "Myvidplay",
+            "dood" to "Dood",
+            "doodstream" to "Dood",
+            "do7go" to "Dood",
+            "byse" to "Bysekoze",
+            "bysekoze" to "Bysekoze",
+            "hexload" to "Hexload",
+            "savefiles" to "SaveFiles",
+            "streamhls" to "SaveFiles",
+            "mixdrop" to "Mixdrop",
+            "voe" to "Voe",
+            "mp4upload" to "Mp4upload",
+            "pixeldrain" to "Pixeldrain",
+            "mega" to "Mega",
+            "filemoon" to "Filemoon",
+            "streamwish" to "Streamwish",
+            "vidhide" to "Vidhide",
+            "uqload" to "Uqload",
+            "lulu" to "Lulu",
+            "listeamed" to "Listeamed",
+            "mxdrop" to "Mixdrop"
+        )
+
+        known.forEach { (key, pretty) ->
+            if (cleaned.contains(key)) return pretty
+        }
+
+        // Capitalizar primera letra de cada palabra
+        return cleaned.split(" ", "-", "_", ".")
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { word ->
+                word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+            }
+    }
+
     private fun Document.getRecommendations(currentUrl: String): List<SearchResponse> {
         return select("div.recomendados a[href]")
             .mapNotNull { element ->

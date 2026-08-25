@@ -93,7 +93,7 @@ subprojects {
         implementation("org.jsoup:jsoup:1.22.2")
         implementation("androidx.annotation:annotation:1.10.0")
         // Do not bump above 2.13.1
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+        implementation("com.fasterxml.jackson.core:jackson-annotations:2.15.2")
         implementation("com.fasterxml.jackson.core:jackson-databind:2.13.1")
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
         // Do not bump above 1.8.1

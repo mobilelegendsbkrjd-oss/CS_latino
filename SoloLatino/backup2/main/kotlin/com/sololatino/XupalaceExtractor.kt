@@ -1,10 +1,10 @@
 package com.sololatino
 
-import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 
 class XupalaceExtractor : ExtractorApi() {
@@ -13,25 +13,17 @@ class XupalaceExtractor : ExtractorApi() {
     override val mainUrl = "https://xupalace.org"
     override val requiresReferer = true
 
-    private var language: String = "LAT"
-
-    fun withLanguage(lang: String): XupalaceExtractor {
-        this.language = lang
-        return this
-    }
-
     override suspend fun getUrl(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+
+        val safeUrl = url.replace("xupalace.com", "xupalace.org")
+        val mainReferer = referer ?: mainUrl
+
         try {
-            val safeUrl = url.replace("xupalace.com", "xupalace.org")
-            val mainReferer = referer ?: mainUrl
-
-            println("[Xupalace] Procesando: $safeUrl (Idioma: $language)")
-
             val doc = app.get(safeUrl, referer = mainReferer).document
             val html = doc.html()
 
@@ -43,21 +35,18 @@ class XupalaceExtractor : ExtractorApi() {
                     .trim()
             }
 
-            // go_to_playerVast
-            Regex("""go_to_playerVast\s*\(\s*['"]([^'"]+)""")
+            // =========================
+            // 1. go_to_playerVast
+            // =========================
+            Regex("""go_to_playerVast\(['"]([^'"]+)""")
                 .findAll(html)
                 .forEach {
                     candidates.add(clean(it.groupValues[1]))
                 }
 
-            // go_to_player
-            Regex("""go_to_player\s*\(\s*['"]([^'"]+)""")
-                .findAll(html)
-                .forEach {
-                    candidates.add(clean(it.groupValues[1]))
-                }
-
-            // iframes
+            // =========================
+            // 2. iframes
+            // =========================
             doc.select("iframe[src]").forEach {
                 val src = it.attr("abs:src")
                 if (src.startsWith("http")) {
@@ -65,7 +54,9 @@ class XupalaceExtractor : ExtractorApi() {
                 }
             }
 
-            // raw urls
+            // =========================
+            // 3. raw urls
+            // =========================
             Regex("""https?://[^\s'"]+""")
                 .findAll(html)
                 .forEach {
@@ -75,7 +66,9 @@ class XupalaceExtractor : ExtractorApi() {
                     }
                 }
 
+            // =========================
             // limpiar + ordenar
+            // =========================
             val unique = candidates
                 .distinct()
                 .filter { it.startsWith("http") }
@@ -86,7 +79,6 @@ class XupalaceExtractor : ExtractorApi() {
                         it.contains("dood") -> 2
                         it.contains("voe") -> 3
                         it.contains("wish") -> 4
-                        it.contains("minochinos") -> 5
                         else -> 99
                     }
                 }
@@ -94,47 +86,43 @@ class XupalaceExtractor : ExtractorApi() {
             var found = false
 
             for (embed in unique) {
+
                 println("[Xupalace] -> $embed")
 
                 try {
                     when {
-                        // DOOD
+
+                        // 🔥 DOOD CUSTOM
                         embed.contains("dood") -> {
                             DoodExtractor().getUrl(embed, safeUrl, subtitleCallback, callback)
                             found = true
                         }
-                        // MINOCHINOS / VIDHIDE
-                        embed.contains("minochinos") || embed.contains("vidhide") -> {
-                            MinochinosExtractorV2().withLanguage(language).getUrl(embed, safeUrl, subtitleCallback, callback)
-                            found = true
-                        }
-                        // PLAYHYDRAX
-                        embed.contains("playhydrax") -> {
-                            PlayHydrax().withLanguage(language).getUrl(embed, safeUrl, subtitleCallback, callback)
-                            found = true
-                        }
-                        // STREAMWISH
-                        embed.contains("wish") || embed.contains("streamwish") || embed.contains("hglink") -> {
-                            loadExtractor(embed, safeUrl, subtitleCallback) {
-                                found = true
-                                callback(it)
-                            }
-                        }
-                        // FILEMOON
-                        embed.contains("filemoon") -> {
-                            loadExtractor(embed, safeUrl, subtitleCallback) {
-                                found = true
-                                callback(it)
-                            }
-                        }
-                        // VOE
+
+                        // 🔥 VOE (fallback genérico)
                         embed.contains("voe") -> {
                             loadExtractor(embed, safeUrl, subtitleCallback) {
                                 found = true
                                 callback(it)
                             }
                         }
-                        // DEFAULT
+
+                        // 🔥 STREAMWISH / WISH
+                        embed.contains("wish") -> {
+                            loadExtractor(embed, safeUrl, subtitleCallback) {
+                                found = true
+                                callback(it)
+                            }
+                        }
+
+                        // 🔥 FILEMOON
+                        embed.contains("filemoon") -> {
+                            loadExtractor(embed, safeUrl, subtitleCallback) {
+                                found = true
+                                callback(it)
+                            }
+                        }
+
+                        // 🔥 DEFAULT
                         else -> {
                             loadExtractor(embed, safeUrl, subtitleCallback) {
                                 found = true
@@ -142,14 +130,16 @@ class XupalaceExtractor : ExtractorApi() {
                             }
                         }
                     }
+
                 } catch (e: Exception) {
                     println("[Xupalace] error: ${e.message}")
                 }
             }
 
-            // fallback
+            // 🔥 fallback real
             if (!found) {
                 println("[Xupalace] fallback")
+
                 loadExtractor(safeUrl, mainReferer, subtitleCallback) {
                     callback(it)
                 }
@@ -167,7 +157,7 @@ class XupalaceExtractor : ExtractorApi() {
         "voe",
         "wish",
         "streamwish",
-        "minochinos",
-        "playhydrax"
+        "minoplayers",
+        "minochinos"
     )
 }
