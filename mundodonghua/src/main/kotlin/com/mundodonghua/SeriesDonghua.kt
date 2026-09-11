@@ -147,7 +147,7 @@ class SeriesDonghua : MainAPI() {
         val episodeUrl = fixUrl(data)
         var found = false
 
-        val response = try {
+        val html = try {
             app.get(
                 episodeUrl,
                 timeout = 90,
@@ -155,72 +155,80 @@ class SeriesDonghua : MainAPI() {
                     "Referer" to "$mainUrl/",
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 )
-            )
+            ).text
         } catch (_: Exception) {
             return false
         }
 
-        val html = response.text
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-
-        // 1) Intentar VIDEO_MAP plano (por si algún día lo dejan sin ofuscar)
-        val plainSources = extractVideoMapSources(html)
-        plainSources.forEach { (platform, value) ->
-            found = resolveSeriesSource(platform, value, episodeUrl, subtitleCallback, callback) || found
-        }
-
-        // 2) Desempaquetar scripts tipo eval(function(h,u,n,t,e,r){...}("...",63,"...",39,5,20))
-        val packedRegex = Regex(
-            """eval\(function\(h,u,n,t,e,r\)\{.*?}\("((?:\\.|[^"\\])*)"\s*,\s*(\d+)\s*,\s*"((?:\\.|[^"\\])*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)\)""",
-            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        // ---------- A) Desempaquetar TODOS los payloads tipo seriesdonghua ----------
+        // Patrón real del sitio:
+        // }("PACKED...", 11, "ARuPtcMnx", 37, 6, 59))
+        val payloadRegex = Regex(
+            """\}\("([^"]{80,})"\s*,\s*(\d+)\s*,\s*"([^"]{3,20})"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)\)"""
         )
 
-        packedRegex.findAll(html).forEach { m ->
-            val packedData = m.groupValues[1]
+        val candidateTexts = mutableListOf(html)
+
+        payloadRegex.findAll(html).forEach { m ->
+            val packed = m.groupValues[1]
             val nStr = m.groupValues[3]
             val t = m.groupValues[4].toIntOrNull() ?: return@forEach
             val e = m.groupValues[5].toIntOrNull() ?: return@forEach
 
-            val unpacked = try {
-                unpackSeriesDonghua(packedData, nStr, t, e)
-            } catch (_: Exception) {
-                null
-            } ?: return@forEach
+            val unpacked = runCatching { unpackSeriesDonghua(packed, nStr, t, e) }.getOrNull()
+            if (!unpacked.isNullOrBlank()) {
+                candidateTexts.add(unpacked)
+            }
+        }
 
-            // Dentro del unpack suele venir document.write('<script>const VIDEO_MAP_JSON=...');
-            val sources = extractVideoMapSources(unpacked)
-            sources.forEach { (platform, value) ->
-                found = resolveSeriesSource(platform, value, episodeUrl, subtitleCallback, callback) || found
+        // ---------- B) Sacar sources de cada texto ----------
+        val sources = linkedMapOf<String, String>() // platform -> value
+
+        candidateTexts.forEach { text ->
+            extractVideoMapSources(text).forEach { (platform, value) ->
+                sources[platform] = value
             }
 
-            // También links sueltos del unpack
-            MundoHostResolver.extractUrls(unpacked).forEach { raw ->
+            // por si el map no matchea bien, buscar hosts conocidos directo
+            Regex(
+                """https?://(?:www\.)?(?:dailymotion\.com/(?:embed/)?video/[A-Za-z0-9]+|ok\.ru/videoembed/\d+|rumble\.com/embed/[A-Za-z0-9_-]+[^"'\\s]*|voe\.(?:sx|to|ninja)/e/[A-Za-z0-9]+)""",
+                RegexOption.IGNORE_CASE
+            ).findAll(text.replace("\\/", "/")).forEach { m ->
+                val u = m.value
+                val key = when {
+                    u.contains("dailymotion", true) -> "asura"
+                    u.contains("ok.ru", true) -> "skadi"
+                    u.contains("rumble", true) -> "fembed"
+                    u.contains("voe.", true) -> "tape"
+                    else -> u
+                }
+                sources.putIfAbsent(key, u)
+            }
+
+            // IDs de dailymotion sueltos tipo \"k41MaraEQ7nOxYJKyw6\"
+            Regex(""""asura"\s*:\s*"\\*"([A-Za-z0-9]{6,})\\*"""").find(text)?.groupValues?.getOrNull(1)?.let {
+                sources.putIfAbsent("asura", it)
+            }
+        }
+
+        // ---------- C) Resolver cada source ----------
+        sources.forEach { (platform, value) ->
+            val ok = resolveSeriesSource(platform, value, episodeUrl, subtitleCallback, callback)
+            found = ok || found
+        }
+
+        // ---------- D) Fallback genérico con MundoHostResolver ----------
+        if (!found) {
+            MundoHostResolver.extractUrls(html).forEach { raw ->
                 val clean = raw.replace("\\/", "/").replace("&amp;", "&")
                 if (MundoHostResolver.isVideoHost(clean) ||
-                    clean.contains(".m3u8", true) ||
-                    clean.contains(".mp4", true)
+                    clean.contains("dailymotion", true) ||
+                    clean.contains("ok.ru", true) ||
+                    clean.contains("rumble", true) ||
+                    clean.contains("voe.", true)
                 ) {
                     found = MundoHostResolver.resolve(clean, episodeUrl, subtitleCallback, callback) || found
                 }
-            }
-        }
-
-        // 3) Fallback: iframes / urls del HTML
-        response.document.select("iframe[src]").forEach { iframe ->
-            val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-            if (src.isNotBlank()) {
-                found = MundoHostResolver.resolve(src, episodeUrl, subtitleCallback, callback) || found
-            }
-        }
-
-        MundoHostResolver.extractUrls(html).forEach { raw ->
-            val clean = raw.replace("\\/", "/").replace("&amp;", "&")
-            if (MundoHostResolver.isVideoHost(clean) ||
-                clean.contains(".m3u8", true) ||
-                clean.contains(".mp4", true)
-            ) {
-                found = MundoHostResolver.resolve(clean, episodeUrl, subtitleCallback, callback) || found
             }
         }
 
@@ -229,35 +237,34 @@ class SeriesDonghua : MainAPI() {
 
     private fun extractVideoMapSources(text: String): List<Pair<String, String>> {
         val out = mutableListOf<Pair<String, String>>()
+        val normalized = text
+            .replace("\\/", "/")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
 
-        // const VIDEO_MAP_JSON={...}
-        val mapMatch = Regex(
-            """VIDEO_MAP_JSON\s*=\s*(\{.*?\})""",
-            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
-        ).find(text)
+        // busca bloques asura/skadi/fembed/tape aunque estén hiper-escapados
+        val platforms = listOf("asura", "skadi", "fembed", "tape")
+        for (p in platforms) {
+            val rx = Regex(
+                """"$p"\s*:\s*"((?:\\.|[^"\\])*)"""",
+                RegexOption.IGNORE_CASE
+            )
+            val m = rx.find(normalized) ?: rx.find(text) ?: continue
+            var value = m.groupValues[1]
+                .replace("\\/", "/")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .trim()
 
-        val mapJson = mapMatch?.groupValues?.getOrNull(1) ?: text
-
-        Regex(""""(\w+)"\s*:\s*"((?:\\.|[^"\\])*)"""")
-            .findAll(mapJson)
-            .forEach { m ->
-                val platform = m.groupValues[1].lowercase()
-                var value = m.groupValues[2]
-                    .replace("\\\"", "\"")
-                    .replace("\\/", "/")
-                    .replace("\\\\", "\\")
-                    .trim()
-
-                // a veces viene "\"id\"" o "\"https://...\""
-                while (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-                    value = value.removeSurrounding("\"")
-                }
-                value = value.trim()
-                if (value.isNotBlank() && platform in setOf("asura", "skadi", "fembed", "tape")) {
-                    out.add(platform to value)
+            // quitar comillas anidadas: "\"abc\"" -> abc
+            repeat(3) {
+                if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
+                    value = value.substring(1, value.length - 1).trim()
                 }
             }
-
+            value = value.trim('"', '\'', ' ', '\n', '\r', '\t')
+            if (value.isNotBlank()) out.add(p to value)
+        }
         return out.distinctBy { it.first to it.second }
     }
 
@@ -270,38 +277,72 @@ class SeriesDonghua : MainAPI() {
     ): Boolean {
         if (value.isBlank()) return false
 
-        return when {
-            platform == "asura" -> {
-                val dm = if (value.startsWith("http", true)) value
-                else "https://www.dailymotion.com/embed/video/$value"
-                MundoHostResolver.resolve(dm, referer, subtitleCallback, callback)
+        val targets = mutableListOf<String>()
+
+        when {
+            platform.equals("asura", true) -> {
+                if (value.startsWith("http", true)) {
+                    targets += value
+                    // también normalizar a embed
+                    Regex("""dailymotion\.com/(?:embed/)?video/([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE)
+                        .find(value)?.groupValues?.getOrNull(1)?.let {
+                            targets += "https://www.dailymotion.com/embed/video/$it"
+                            targets += "https://www.dailymotion.com/video/$it"
+                        }
+                } else {
+                    targets += "https://www.dailymotion.com/embed/video/$value"
+                    targets += "https://www.dailymotion.com/video/$value"
+                }
             }
-            value.startsWith("http", true) -> {
-                MundoHostResolver.resolve(value, referer, subtitleCallback, callback)
-            }
-            else -> false
+            value.startsWith("http", true) -> targets += value
+            else -> return false
         }
+
+        var ok = false
+        for (url in targets.distinct()) {
+            // 1) tu resolver compartido
+            if (MundoHostResolver.resolve(url, referer, subtitleCallback, callback)) {
+                ok = true
+                continue
+            }
+            // 2) extractores nativos de CloudStream
+            try {
+                loadExtractor(url, referer, subtitleCallback) { link ->
+                    callback.invoke(link)
+                    ok = true
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return ok
     }
 
-    /**
-     * Decoder del packer de seriesdonghua:
-     * eval(function(h,u,n,t,e,r){...}(h, u, n, t, e, r))
-     */
+    /** Packer de seriesdonghua: }("h", u, "n", t, e, r)) */
     private fun unpackSeriesDonghua(h: String, nStr: String, t: Int, e: Int): String {
+        if (e <= 0 || e >= nStr.length) return ""
+
         val alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/"
-        fun unbase(str: String, radixFrom: Int): Int {
-            val table = alphabet.substring(0, radixFrom)
+        val table = alphabet.substring(0, e)
+        val sep = nStr[e]
+
+        fun unbase(str: String): Int {
             var j = 0
-            str.reversed().forEachIndexed { idx, ch ->
-                val pos = table.indexOf(ch)
-                if (pos >= 0) j += pos * Math.pow(radixFrom.toDouble(), idx.toDouble()).toInt()
+            var pow = 1
+            for (idx in str.length - 1 downTo 0) {
+                val pos = table.indexOf(str[idx])
+                if (pos >= 0) {
+                    j += pos * pow
+                }
+                // pow *= e, cuidando overflow absurdo
+                if (idx > 0) {
+                    val next = pow * e
+                    pow = if (next > 0) next else break
+                }
             }
             return j
         }
 
-        if (e < 0 || e >= nStr.length) return ""
-        val sep = nStr[e]
-        val sb = StringBuilder()
+        val out = StringBuilder()
         var i = 0
         while (i < h.length) {
             val chunk = StringBuilder()
@@ -309,26 +350,20 @@ class SeriesDonghua : MainAPI() {
                 chunk.append(h[i])
                 i++
             }
-            i++ // saltar separador
+            i++ // skip sep
 
             var s = chunk.toString()
             for (j in nStr.indices) {
                 s = s.replace(nStr[j].toString(), j.toString())
             }
+            if (s.isEmpty()) continue
 
-            // s ahora es "dígitos" en base e (como string de chars del alphabet index)
-            // En el JS original: unbase(s, e, 10) - t
-            // Después del replace, s son caracteres '0','1',... que representan dígitos en base e
-            val code = try {
-                unbase(s, e) - t
-            } catch (_: Exception) {
-                continue
-            }
-            if (code in 0..0x10FFFF) {
-                sb.append(code.toChar())
+            val code = unbase(s) - t
+            if (code in 0..0xFFFF) {
+                out.append(code.toChar())
             }
         }
-        return sb.toString()
+        return out.toString()
     }
 
     private fun parseCards(element: Element): List<SearchResponse> {
