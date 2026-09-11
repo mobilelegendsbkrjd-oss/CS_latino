@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class MundoDonghuaPlugin : Plugin() {
     override fun load() {
         registerMainAPI(MundoDonghua())
+        registerMainAPI(SeriesDonghua())
 
         registerExtractorAPI(BysekozeMundo())
         registerExtractorAPI(VidHideMundo())

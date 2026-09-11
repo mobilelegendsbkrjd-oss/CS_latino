@@ -348,13 +348,13 @@ class SoloLatino : MainAPI() {
         }
     }
 
-    // ====================== LOAD LINKS ======================
+    // ====================== LOAD LINKS (OPTIMIZADO) ======================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    ): Boolean = coroutineScope {
         Log.d(TAG, "=== INICIANDO LOADLINKS ===")
         Log.d(TAG, "URL: $data")
 
@@ -370,11 +370,10 @@ class SoloLatino : MainAPI() {
 
         val playerUrls = mutableListOf<Pair<String, String>>()
 
-        // --- 1. Buscar TODOS los botones de servidor con data-player-token ---
+        // 1. Botones data-player-token
         doc.select("button[data-player-token]").forEach { btn ->
             val token = btn.attr("data-player-token")
             val serverName = btn.text().trim()
-
             if (token.isNotBlank()) {
                 try {
                     val response = app.post(
@@ -398,7 +397,7 @@ class SoloLatino : MainAPI() {
             }
         }
 
-        // --- 2. Buscar botones de servidor con data-server-url ---
+        // 2. data-server-url
         doc.select("button[data-server-url]").forEach { btn ->
             val url = btn.attr("data-server-url")
             val serverName = btn.text().trim()
@@ -411,7 +410,7 @@ class SoloLatino : MainAPI() {
             }
         }
 
-        // --- 3. Buscar TODOS los iframes ---
+        // 3. iframes
         doc.select("iframe[src]").forEach { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
@@ -423,23 +422,18 @@ class SoloLatino : MainAPI() {
             }
         }
 
-        // --- 4. Buscar en el JavaScript y enlaces directos ---
+        // 4. Enlaces directos + JS
         val html = doc.html()
 
         Regex("""https?://[^\s"'<>]+\.(m3u8|mp4)[^\s"'<>]*""")
             .findAll(html)
             .forEach { match ->
-                val url = match.value
-                if (url.isNotBlank()) {
-                    val finalUrl = fixHostsLinks(url)
-                    if (finalUrl.isNotBlank()) {
-                        Log.d(TAG, "Enlace directo: $finalUrl")
-                        playerUrls.add(Pair(finalUrl, "directo"))
-                    }
+                val finalUrl = fixHostsLinks(match.value)
+                if (finalUrl.isNotBlank()) {
+                    playerUrls.add(Pair(finalUrl, "directo"))
                 }
             }
 
-        // Buscar URLs de reproductores en scripts
         val jsPatterns = listOf(
             Regex("""https://player\.pelisserieshoy\.com/f/[^"'\s]+"""),
             Regex("""https://embed69\.org/f/[^"'\s]+"""),
@@ -452,18 +446,14 @@ class SoloLatino : MainAPI() {
 
         jsPatterns.forEach { pattern ->
             pattern.findAll(html).forEach { match ->
-                val url = match.value
-                if (url.isNotBlank()) {
-                    val fixedUrl = fixHostsLinks(url)
-                    if (fixedUrl.isNotBlank()) {
-                        Log.d(TAG, "URL en JS: $fixedUrl")
-                        playerUrls.add(Pair(fixedUrl, "js_found"))
-                    }
+                val fixedUrl = fixHostsLinks(match.value)
+                if (fixedUrl.isNotBlank()) {
+                    playerUrls.add(Pair(fixedUrl, "js_found"))
                 }
             }
         }
 
-        // --- 5. Si no hay URLs, usar el iframe principal ---
+        // 5. Fallback iframe principal
         if (playerUrls.isEmpty()) {
             val iframe = doc.select("#player-frame iframe").firstOrNull()
             if (iframe != null) {
@@ -471,321 +461,286 @@ class SoloLatino : MainAPI() {
                 if (src.isNotBlank()) {
                     val fixedUrl = fixHostsLinks(fixUrl(src))
                     if (fixedUrl.isNotBlank()) {
-                        Log.d(TAG, "Usando iframe principal: $fixedUrl")
                         playerUrls.add(Pair(fixedUrl, "main_iframe"))
                     }
                 }
             }
         }
 
-        // --- 6. PROCESAR CADA URL ÚNICA ---
-        var foundLinks = false
         val uniqueUrls = playerUrls.distinctBy { it.first }
+        Log.d(TAG, "Total URLs únicas: ${uniqueUrls.size}")
 
-        Log.d(TAG, "Total URLs únicas encontradas: ${uniqueUrls.size}")
-
-        for ((playerUrl, serverName) in uniqueUrls) {
-            Log.d(TAG, "Procesando: $playerUrl (Servidor: $serverName)")
-
-            try {
-                when {
-                    // Xupalace - CON IDIOMA Y SOPORTE PARA TODOS LOS SERVIDORES
-                    playerUrl.contains("xupalace.org") || playerUrl.contains("xupalace.com") -> {
-                        Log.d(TAG, "Procesando Xupalace: $playerUrl")
-                        try {
-                            val xupalaceDoc = app.get(playerUrl, referer = data).document
-                            val xupalaceHtml = xupalaceDoc.html()
-
-                            Log.d(TAG, "Xupalace HTML length: ${xupalaceHtml.length}")
-
-                            // 🔥 BUSCAR go_to_playerVast CON EL IDIOMA Y NOMBRE DEL SERVIDOR
-                            val langMap = mapOf("0" to "LAT", "1" to "ESP", "2" to "SUB")
-                            val regex = Regex("""go_to_playerVast\s*\(\s*['"]([^'"]+)['"]\s*,\s*\d+,\s*\d+\)[^<]*<span>([^<]+)</span>[^<]*data-lang="([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
-
-                            val matches = regex.findAll(xupalaceHtml).toList()
-
-                            if (matches.isNotEmpty()) {
-                                for (match in matches) {
-                                    val rawUrl = match.groupValues[1]
-                                    val serverName = match.groupValues[2].trim()
-                                    val langCode = match.groupValues[3]
-                                    val language = langMap[langCode] ?: "LAT"
-
-                                    var finalUrl = rawUrl
-                                    if (rawUrl.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
-                                        try {
-                                            val decoded = android.util.Base64.decode(rawUrl, android.util.Base64.DEFAULT)
-                                            val decodedString = String(decoded, Charsets.UTF_8)
-                                            if (decodedString.startsWith("http")) {
-                                                finalUrl = decodedString
-                                            } else if (decodedString.startsWith("{")) {
-                                                val linkMatch = Regex("\"link\"\\s*:\\s*\"([^\"]+)\"").find(decodedString)
-                                                finalUrl = linkMatch?.groupValues?.get(1) ?: finalUrl
-                                            }
-                                        } catch (_: Exception) {}
-                                    }
-
-                                    if (finalUrl.startsWith("http") && !finalUrl.contains("xupalace.org")) {
-                                        Log.d(TAG, "Xupalace -> $language [$serverName]: $finalUrl")
-
-                                        // ============================================
-                                        // CARGAR SEGÚN EL SERVIDOR
-                                        // ============================================
-                                        val fixedUrl = fixHostsLinks(finalUrl)
-
-                                        when {
-                                            // StreamWish
-                                            fixedUrl.contains("streamwish") || fixedUrl.contains("hglink") ||
-                                                    fixedUrl.contains("swdyu") || fixedUrl.contains("wishembed") -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // VidHide / Minochinos - USAR VidHidePro
-                                            fixedUrl.contains("vidhide") || fixedUrl.contains("minochinos") ||
-                                                    fixedUrl.contains("mivalyo") || fixedUrl.contains("dhtpre") -> {
-                                                when {
-                                                    fixedUrl.contains("minochinos") -> {
-                                                        MinochinosExtractorV2().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    }
-                                                    else -> {
-                                                        loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    }
-                                                }
-                                            }
-                                            // WaaW
-                                            fixedUrl.contains("waaw.to") -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // FileMoon - USAR FilemoonV2
-                                            fixedUrl.contains("filemoon") || fixedUrl.contains("bysedikamoum") -> {
-                                                when {
-                                                    fixedUrl.contains("filemoon.to") -> FileMoon2().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    fixedUrl.contains("filemoon.in") -> FileMoonIn().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    fixedUrl.contains("filemoon.sx") -> FileMoonSx().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    fixedUrl.contains("bysedikamoum") -> Bysedikamoum().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                                    else -> loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                                }
-                                            }
-                                            // VOE
-                                            fixedUrl.contains("voe") -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // Dood - USAR DoodExtractor
-                                            fixedUrl.contains("dood") || fixedUrl.contains("dood.la") || fixedUrl.contains("do7go") -> {
-                                                DoodExtractor().getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // PlayHydrax - USAR PlayHydrax
-                                            fixedUrl.contains("playhydrax") || fixedUrl.contains("abyssplayer") ||
-                                                    fixedUrl.contains("player-cdn.com") -> {
-                                                PlayHydrax().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // 1fichier (descarga directa)
-                                            fixedUrl.contains("1fichier") -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // Stape (normalmente es StreamWish)
-                                            fixedUrl.contains("stape") || fixedUrl.contains("player-cdn") -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                            // Enlace directo M3U8/MP4
-                                            fixedUrl.contains(".m3u8") || fixedUrl.contains(".mp4") -> {
-                                                callback.invoke(
-                                                    newExtractorLink(
-                                                        source = "SoloLatino",
-                                                        name = "$language[$serverName]",
-                                                        url = fixedUrl,
-                                                        type = if (fixedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                                    ) {
-                                                        this.referer = playerUrl
-                                                    }
-                                                )
-                                            }
-                                            // DEFAULT
-                                            else -> {
-                                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
-                                            }
-                                        }
-                                    }
-                                }
-                                foundLinks = true
-                            } else {
-                                // FALLBACK: Buscar solo las URLs sin idioma
-                                Log.d(TAG, "Xupalace: buscando enlaces sin idioma")
-                                val regexFallback = Regex("""go_to_playerVast\s*\(\s*['"]([^'"]+)['"]""")
-                                val urls = regexFallback.findAll(xupalaceHtml)
-                                    .map { it.groupValues[1] }
-                                    .filter { it.isNotBlank() && !it.contains("xupalace.org") }
-                                    .toList()
-
-                                if (urls.isNotEmpty()) {
-                                    for (rawUrl in urls) {
-                                        var finalUrl = rawUrl
-                                        if (rawUrl.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
-                                            try {
-                                                val decoded = android.util.Base64.decode(rawUrl, android.util.Base64.DEFAULT)
-                                                val decodedString = String(decoded, Charsets.UTF_8)
-                                                if (decodedString.startsWith("http")) {
-                                                    finalUrl = decodedString
-                                                } else if (decodedString.startsWith("{")) {
-                                                    val linkMatch = Regex("\"link\"\\s*:\\s*\"([^\"]+)\"").find(decodedString)
-                                                    finalUrl = linkMatch?.groupValues?.get(1) ?: finalUrl
-                                                }
-                                            } catch (_: Exception) {}
-                                        }
-
-                                        if (finalUrl.startsWith("http") && !finalUrl.contains("xupalace.org")) {
-                                            Log.d(TAG, "Xupalace -> LAT (fallback): $finalUrl")
-                                            loadExtractorWithLanguage(
-                                                "LAT",
-                                                fixHostsLinks(finalUrl),
-                                                playerUrl,
-                                                subtitleCallback,
-                                                callback
-                                            )
-                                        }
-                                    }
-                                    foundLinks = true
-                                } else {
-                                    Log.d(TAG, "Xupalace: no hay enlaces, usando loadExtractor")
-                                    loadExtractor(playerUrl, data, subtitleCallback, callback)
-                                    foundLinks = true
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error en Xupalace: ${e.message}")
-                            loadExtractor(playerUrl, data, subtitleCallback, callback)
-                            foundLinks = true
-                        }
-                    }
-                    // Embed69
-                    playerUrl.contains("embed69.org") || playerUrl.contains("embed69.com") -> {
-                        Log.d(TAG, "Usando Embed69Extractor")
-                        Embed69Extractor.load(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // PlayerPelisSeriesHoy
-                    playerUrl.contains("player.pelisserieshoy.com") || playerUrl.contains("pelisserieshoy.com") -> {
-                        Log.d(TAG, "Usando PlayerPelisSeriesHoyExtractor")
-                        PlayerPelisSeriesHoyExtractor.load(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // PlayHydrax
-                    playerUrl.contains("playhydrax") || playerUrl.contains("abyssplayer") -> {
-                        Log.d(TAG, "Usando PlayHydrax")
-                        val lang = when {
-                            playerUrl.contains("/lat/") || playerUrl.contains("latino") -> "LAT"
-                            playerUrl.contains("/esp/") || playerUrl.contains("espanol") -> "ESP"
-                            playerUrl.contains("/sub/") || playerUrl.contains("subtitulado") -> "SUB"
-                            else -> "LAT"
-                        }
-                        PlayHydrax().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // Dood
-                    playerUrl.contains("dood") || playerUrl.contains("dood.la") || playerUrl.contains("do7go") -> {
-                        Log.d(TAG, "Usando DoodExtractor")
-                        DoodExtractor().getUrl(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // F75s
-                    playerUrl.contains("f75s") || playerUrl.contains("f75s.com") -> {
-                        Log.d(TAG, "Usando F75s")
-                        val lang = when {
-                            playerUrl.contains("/lat/") || playerUrl.contains("latino") -> "LAT"
-                            playerUrl.contains("/esp/") || playerUrl.contains("espanol") -> "ESP"
-                            playerUrl.contains("/sub/") || playerUrl.contains("subtitulado") -> "SUB"
-                            else -> "LAT"
-                        }
-                        F75s().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // Minochinos
-                    playerUrl.contains("minochinos") -> {
-                        Log.d(TAG, "Usando MinochinosExtractorV2")
-                        MinochinosExtractorV2().getUrl(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // StreamWish
-                    playerUrl.contains("streamwish") || playerUrl.contains("wish") ||
-                            playerUrl.contains("hglink") || playerUrl.contains("swdyu") ||
-                            playerUrl.contains("cybervynx") || playerUrl.contains("dumbalag") -> {
-                        Log.d(TAG, "Cargando StreamWish: $playerUrl")
-                        loadExtractor(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // VidHide
-                    playerUrl.contains("vidhide") || playerUrl.contains("mivalyo") ||
-                            playerUrl.contains("dinisglows") || playerUrl.contains("dhtpre") -> {
-                        Log.d(TAG, "Cargando VidHide: $playerUrl")
-                        loadExtractor(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // Filemoon
-                    playerUrl.contains("filemoon") || playerUrl.contains("bysedikamoum") -> {
-                        Log.d(TAG, "Usando FilemoonV2")
-                        val lang = when {
-                            playerUrl.contains("/lat/") || playerUrl.contains("latino") -> "LAT"
-                            playerUrl.contains("/esp/") || playerUrl.contains("espanol") -> "ESP"
-                            playerUrl.contains("/sub/") || playerUrl.contains("subtitulado") -> "SUB"
-                            else -> "LAT"
-                        }
-                        when {
-                            playerUrl.contains("filemoon.to") -> FileMoon2().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                            playerUrl.contains("filemoon.in") -> FileMoonIn().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                            playerUrl.contains("filemoon.sx") -> FileMoonSx().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                            playerUrl.contains("bysedikamoum") -> Bysedikamoum().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
-                            else -> loadExtractor(playerUrl, data, subtitleCallback, callback)
-                        }
-                        foundLinks = true
-                    }
-                    // VOE
-                    playerUrl.contains("voe") -> {
-                        Log.d(TAG, "Cargando VOE: $playerUrl")
-                        loadExtractor(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
-                    // Enlace directo M3U8/MP4
-                    playerUrl.contains(".m3u8") || playerUrl.contains(".mp4") -> {
-                        Log.d(TAG, "Enlace directo: $playerUrl")
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "SoloLatino",
-                                name = if (serverName.isNotBlank() &&
-                                    serverName != "directo" &&
-                                    serverName != "iframe" &&
-                                    serverName != "js_found" &&
-                                    serverName != "main_iframe")
-                                    serverName else "Directo",
-                                url = playerUrl,
-                                type = if (playerUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = data
-                            }
-                        )
-                        foundLinks = true
-                    }
-                    // Fallback genérico
-                    else -> {
-                        Log.d(TAG, "Fallback genérico para: $playerUrl")
-                        loadExtractor(playerUrl, data, subtitleCallback, callback)
-                        foundLinks = true
-                    }
+        // ========== PROCESAMIENTO EN PARALELO ==========
+        val jobs = uniqueUrls.map { (playerUrl, serverName) ->
+            async {
+                try {
+                    processSinglePlayer(playerUrl, serverName, data, subtitleCallback, callback)
+                    true
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error procesando $playerUrl: ${e.message}")
+                    false
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error procesando $playerUrl: ${e.message}")
             }
         }
 
-        // --- 7. Fallback final ---
+        val results = jobs.awaitAll()
+        val foundLinks = results.any { it }
+
         if (!foundLinks) {
-            Log.d(TAG, "No se encontraron enlaces, fallback final con: $data")
+            Log.d(TAG, "Fallback final con: $data")
             loadExtractor(data, data, subtitleCallback, callback)
         }
 
-        Log.d(TAG, "Esperando 3 segundos para que los extractores terminen...")
-        delay(3000)
-        Log.d(TAG, "Continuando...")
+        // Delay reducido (solo para evitar race conditions)
+        if (foundLinks) delay(600)
 
-        return true
+        true
+    }
+
+    private suspend fun processSinglePlayer(
+        playerUrl: String,
+        serverName: String,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        Log.d(TAG, "Procesando: $playerUrl (Servidor: $serverName)")
+
+        when {
+            // Xupalace
+            playerUrl.contains("xupalace.org") || playerUrl.contains("xupalace.com") -> {
+                processXupalace(playerUrl, data, subtitleCallback, callback)
+            }
+            // Embed69
+            playerUrl.contains("embed69.org") || playerUrl.contains("embed69.com") -> {
+                Embed69Extractor.load(playerUrl, data, subtitleCallback, callback)
+            }
+            // PlayerPelisSeriesHoy
+            playerUrl.contains("player.pelisserieshoy.com") || playerUrl.contains("pelisserieshoy.com") -> {
+                PlayerPelisSeriesHoyExtractor.load(playerUrl, data, subtitleCallback, callback)
+            }
+            // PlayHydrax
+            playerUrl.contains("playhydrax") || playerUrl.contains("abyssplayer") -> {
+                val lang = detectLang(playerUrl)
+                PlayHydrax().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+            }
+            // Dood
+            playerUrl.contains("dood") || playerUrl.contains("dood.la") || playerUrl.contains("do7go") -> {
+                DoodExtractor().getUrl(playerUrl, data, subtitleCallback, callback)
+            }
+            // F75s
+            playerUrl.contains("f75s") || playerUrl.contains("f75s.com") -> {
+                val lang = detectLang(playerUrl)
+                F75s().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+            }
+            // Minochinos
+            playerUrl.contains("minochinos") -> {
+                MinochinosExtractorV2().getUrl(playerUrl, data, subtitleCallback, callback)
+            }
+            // StreamWish
+            playerUrl.contains("streamwish") || playerUrl.contains("wish") ||
+                    playerUrl.contains("hglink") || playerUrl.contains("swdyu") ||
+                    playerUrl.contains("cybervynx") || playerUrl.contains("dumbalag") -> {
+                loadExtractor(playerUrl, data, subtitleCallback, callback)
+            }
+            // VidHide
+            playerUrl.contains("vidhide") || playerUrl.contains("mivalyo") ||
+                    playerUrl.contains("dinisglows") || playerUrl.contains("dhtpre") -> {
+                loadExtractor(playerUrl, data, subtitleCallback, callback)
+            }
+            // Filemoon
+            playerUrl.contains("filemoon") || playerUrl.contains("bysedikamoum") -> {
+                val lang = detectLang(playerUrl)
+                when {
+                    playerUrl.contains("filemoon.to") -> FileMoon2().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+                    playerUrl.contains("filemoon.in") -> FileMoonIn().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+                    playerUrl.contains("filemoon.sx") -> FileMoonSx().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+                    playerUrl.contains("bysedikamoum") -> Bysedikamoum().withLanguage(lang).getUrl(playerUrl, data, subtitleCallback, callback)
+                    else -> loadExtractor(playerUrl, data, subtitleCallback, callback)
+                }
+            }
+            // VOE
+            playerUrl.contains("voe") -> {
+                loadExtractor(playerUrl, data, subtitleCallback, callback)
+            }
+            // Directo m3u8/mp4
+            playerUrl.contains(".m3u8") || playerUrl.contains(".mp4") -> {
+                callback.invoke(
+                    newExtractorLink(
+                        source = "SoloLatino",
+                        name = if (serverName.isNotBlank() &&
+                            serverName != "directo" &&
+                            serverName != "iframe" &&
+                            serverName != "js_found" &&
+                            serverName != "main_iframe"
+                        ) serverName else "Directo",
+                        url = playerUrl,
+                        type = if (playerUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = data
+                    }
+                )
+            }
+            // Fallback genérico
+            else -> {
+                loadExtractor(playerUrl, data, subtitleCallback, callback)
+            }
+        }
+    }
+
+    private fun detectLang(url: String): String = when {
+        url.contains("/lat/") || url.contains("latino", ignoreCase = true) -> "LAT"
+        url.contains("/esp/") || url.contains("espanol", ignoreCase = true) -> "ESP"
+        url.contains("/sub/") || url.contains("subtitulado", ignoreCase = true) -> "SUB"
+        else -> "LAT"
+    }
+
+    // ====================== XUPALACE (MISMA LÓGICA COMPLETA) ======================
+    private suspend fun processXupalace(
+        playerUrl: String,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            val xupalaceDoc = app.get(playerUrl, referer = data).document
+            val xupalaceHtml = xupalaceDoc.html()
+
+            Log.d(TAG, "Xupalace HTML length: ${xupalaceHtml.length}")
+
+            val langMap = mapOf("0" to "LAT", "1" to "ESP", "2" to "SUB")
+            val regex = Regex(
+                """go_to_playerVast\s*\(\s*['"]([^'"]+)['"]\s*,\s*\d+,\s*\d+\)[^<]*<span>([^<]+)</span>[^<]*data-lang="([^"]+)"""",
+                RegexOption.DOT_MATCHES_ALL
+            )
+
+            val matches = regex.findAll(xupalaceHtml).toList()
+
+            if (matches.isNotEmpty()) {
+                for (match in matches) {
+                    val rawUrl = match.groupValues[1]
+                    val serverName = match.groupValues[2].trim()
+                    val langCode = match.groupValues[3]
+                    val language = langMap[langCode] ?: "LAT"
+
+                    var finalUrl = rawUrl
+                    if (rawUrl.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
+                        try {
+                            val decoded = Base64.decode(rawUrl, Base64.DEFAULT)
+                            val decodedString = String(decoded, Charsets.UTF_8)
+                            if (decodedString.startsWith("http")) {
+                                finalUrl = decodedString
+                            } else if (decodedString.startsWith("{")) {
+                                val linkMatch = Regex("\"link\"\\s*:\\s*\"([^\"]+)\"").find(decodedString)
+                                finalUrl = linkMatch?.groupValues?.get(1) ?: finalUrl
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    if (finalUrl.startsWith("http") && !finalUrl.contains("xupalace.org")) {
+                        Log.d(TAG, "Xupalace -> $language [$serverName]: $finalUrl")
+                        val fixedUrl = fixHostsLinks(finalUrl)
+
+                        when {
+                            fixedUrl.contains("streamwish") || fixedUrl.contains("hglink") ||
+                                    fixedUrl.contains("swdyu") || fixedUrl.contains("wishembed") -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("vidhide") || fixedUrl.contains("minochinos") ||
+                                    fixedUrl.contains("mivalyo") || fixedUrl.contains("dhtpre") -> {
+                                when {
+                                    fixedUrl.contains("minochinos") -> {
+                                        MinochinosExtractorV2().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                                    }
+                                    else -> {
+                                        loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                                    }
+                                }
+                            }
+                            fixedUrl.contains("waaw.to") -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("filemoon") || fixedUrl.contains("bysedikamoum") -> {
+                                when {
+                                    fixedUrl.contains("filemoon.to") -> FileMoon2().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                                    fixedUrl.contains("filemoon.in") -> FileMoonIn().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                                    fixedUrl.contains("filemoon.sx") -> FileMoonSx().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                                    fixedUrl.contains("bysedikamoum") -> Bysedikamoum().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                                    else -> loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                                }
+                            }
+                            fixedUrl.contains("voe") -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("dood") || fixedUrl.contains("dood.la") || fixedUrl.contains("do7go") -> {
+                                DoodExtractor().getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("playhydrax") || fixedUrl.contains("abyssplayer") ||
+                                    fixedUrl.contains("player-cdn.com") -> {
+                                PlayHydrax().withLanguage(language).getUrl(fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("1fichier") -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains("stape") || fixedUrl.contains("player-cdn") -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                            fixedUrl.contains(".m3u8") || fixedUrl.contains(".mp4") -> {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = "SoloLatino",
+                                        name = "$language[$serverName]",
+                                        url = fixedUrl,
+                                        type = if (fixedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = playerUrl
+                                    }
+                                )
+                            }
+                            else -> {
+                                loadExtractorWithLanguage(language, fixedUrl, playerUrl, subtitleCallback, callback)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fallback sin idioma
+                Log.d(TAG, "Xupalace: buscando enlaces sin idioma")
+                val regexFallback = Regex("""go_to_playerVast\s*\(\s*['"]([^'"]+)['"]""")
+                val urls = regexFallback.findAll(xupalaceHtml)
+                    .map { it.groupValues[1] }
+                    .filter { it.isNotBlank() && !it.contains("xupalace.org") }
+                    .toList()
+
+                if (urls.isNotEmpty()) {
+                    for (rawUrl in urls) {
+                        var finalUrl = rawUrl
+                        if (rawUrl.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
+                            try {
+                                val decoded = Base64.decode(rawUrl, Base64.DEFAULT)
+                                val decodedString = String(decoded, Charsets.UTF_8)
+                                if (decodedString.startsWith("http")) {
+                                    finalUrl = decodedString
+                                } else if (decodedString.startsWith("{")) {
+                                    val linkMatch = Regex("\"link\"\\s*:\\s*\"([^\"]+)\"").find(decodedString)
+                                    finalUrl = linkMatch?.groupValues?.get(1) ?: finalUrl
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        if (finalUrl.startsWith("http") && !finalUrl.contains("xupalace.org")) {
+                            Log.d(TAG, "Xupalace -> LAT (fallback): $finalUrl")
+                            loadExtractorWithLanguage("LAT", fixHostsLinks(finalUrl), playerUrl, subtitleCallback, callback)
+                        }
+                    }
+                } else {
+                    loadExtractor(playerUrl, data, subtitleCallback, callback)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en Xupalace: ${e.message}")
+            loadExtractor(playerUrl, data, subtitleCallback, callback)
+        }
     }
 
     // ====================== UTILS ======================
@@ -873,7 +828,6 @@ private suspend fun loadExtractorWithLanguage(
     callback: (ExtractorLink) -> Unit
 ) {
     loadExtractor(url, referer, subtitleCallback) { link ->
-        // Usar CoroutineScope en lugar de GlobalScope
         CoroutineScope(Dispatchers.IO).launch {
             callback.invoke(
                 newExtractorLink(
