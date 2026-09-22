@@ -5,12 +5,15 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.USER_AGENT
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
-import com.lagradost.cloudstream3.extractors.VidStack
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.net.URI
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.random.Random
 
 /**
@@ -145,8 +148,12 @@ object LatanimeExternalExtractor {
                         loadExtractor(normalized, referer, subtitleCallback) { emit(it) }
                     }
                 }
-                lower.contains("upns.online") || lower.contains("vidstack") -> {
-                    VidStack().getUrl(fixed, referer, subtitleCallback) { emit(it) }
+                lower.contains("upns.online") || lower.contains("vidstack") ||
+                        lower.contains("f1seekplayer") || lower.contains("seekplayer") -> {
+                    VidStackLatanime().getUrl(fixed, referer, subtitleCallback) { emit(it) }
+                }
+                lower.contains("pixeldrain") -> {
+                    PixelDrainLatanime().getUrl(fixed, referer, subtitleCallback) { emit(it) }
                 }
             }
         } catch (e: Exception) {
@@ -902,7 +909,12 @@ class DoodLatanime : ExtractorApi() {
     }
 }
 
-// ===================== SAVEFILES =====================
+// ===================== SAVEFILES / STREAMHLS =====================
+/**
+ * Método principal: POST /dl (estilo streamflix / Lulu)
+ * Fallback: GET directo + regex (método anterior)
+ * No rompe nada: si falla el nuevo, usa el viejo.
+ */
 class SaveFilesLatanime {
     private val name = "SaveFiles"
 
@@ -913,19 +925,65 @@ class SaveFilesLatanime {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            val cleanUrl = url.replace("/e/", "/").replace("/d/", "/")
-            val html = app.get(
-                cleanUrl,
-                headers = mapOf("Referer" to (referer ?: url), "User-Agent" to USER_AGENT)
-            ).text
+            val parsed = java.net.URL(url.replace("\\/", "/"))
+            val pathParts = parsed.path.split("/").filter { it.isNotEmpty() }
+            val fileCode = pathParts.lastOrNull()?.split("?")?.firstOrNull()?.trim().orEmpty()
+            if (fileCode.isBlank()) return false
 
-            if (html.contains(Regex("file was locked|file was deleted", RegexOption.IGNORE_CASE))) return false
+            val baseUrl = "${parsed.protocol}://${parsed.host}"
+            val headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to (referer ?: baseUrl)
+            )
 
-            val fileMatch = Regex("""file\s*:\s*["'](https?://[^"']+)["']""")
-                .find(html)?.groupValues?.getOrNull(1)
-                ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
-                    .find(html)?.groupValues?.getOrNull(1)
-                ?: return false
+            // 1) Método robusto: POST /dl (igual que Lulu / streamflix)
+            var html = ""
+            try {
+                html = app.post(
+                    "$baseUrl/dl",
+                    data = mapOf(
+                        "op" to "embed",
+                        "file_code" to fileCode,
+                        "auto" to "0",
+                        "referer" to (referer ?: "")
+                    ),
+                    headers = headers
+                ).text
+            } catch (_: Exception) {
+            }
+
+            // 2) Fallback: página limpia (método anterior)
+            if (html.isBlank() || html.contains(Regex("file was locked|file was deleted", RegexOption.IGNORE_CASE))) {
+                val cleanUrl = url.replace("/e/", "/").replace("/d/", "/")
+                html = app.get(cleanUrl, headers = headers).text
+                if (html.contains(Regex("file was locked|file was deleted", RegexOption.IGNORE_CASE))) {
+                    return false
+                }
+            }
+
+            // Buscar en scripts jwplayer (método streamflix)
+            var fileMatch: String? = null
+            val scriptRegex = Regex("""file\s*:\s*["'](https?://[^"']+)["']""")
+
+            Regex("""<script[^>]*>([\s\S]*?)</script>""", RegexOption.IGNORE_CASE)
+                .findAll(html)
+                .forEach { scriptMatch ->
+                    val data = scriptMatch.groupValues.getOrNull(1).orEmpty()
+                    if (("jwplayer" in data || "sources" in data) && "file" in data) {
+                        scriptRegex.find(data)?.groupValues?.getOrNull(1)?.let {
+                            if (fileMatch == null) fileMatch = it.replace("\\/", "/")
+                        }
+                    }
+                }
+
+            // Fallback regex global (método anterior)
+            if (fileMatch.isNullOrBlank()) {
+                fileMatch = scriptRegex.find(html)?.groupValues?.getOrNull(1)?.replace("\\/", "/")
+                    ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
+                        .find(html)?.groupValues?.getOrNull(1)?.replace("\\/", "/")
+            }
+
+            if (fileMatch.isNullOrBlank()) return false
 
             val height = Regex("""\[(\d{3,})x(\d{3,})""").find(html)?.groupValues?.getOrNull(2)?.toIntOrNull()
             val quality = when {
@@ -936,11 +994,22 @@ class SaveFilesLatanime {
             }
 
             callback.invoke(
-                newExtractorLink(name, name, fileMatch,
-                    if (fileMatch.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = fileMatch!!,
+                    type = if (fileMatch!!.contains(".m3u8") || fileMatch!!.contains("/hls")) {
+                        ExtractorLinkType.M3U8
+                    } else {
+                        ExtractorLinkType.VIDEO
+                    }
                 ) {
-                    this.referer = cleanUrl
+                    this.referer = baseUrl
                     this.quality = quality
+                    this.headers = mapOf(
+                        "Referer" to baseUrl,
+                        "User-Agent" to USER_AGENT
+                    )
                 }
             )
             true
@@ -992,3 +1061,171 @@ class HexloadLatanime {
         }
     }
 }
+
+// ===================== VIDSTACK =====================
+/**
+ * VidStack / upns.online / f1seekplayer
+ * API /api/v1/video + AES-CBC decrypt (key: kiemtienmua911ca)
+ */
+class VidStackLatanime : ExtractorApi() {
+    override var name = "VidStack"
+    override var mainUrl = "https://f1seekplayer.com"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            val baseurl = getBaseUrl(url)
+            val id = extractId(url) ?: return
+            val videoApiUrl = "$baseurl/api/v1/video?id=$id&w=1920&h=1080&r="
+
+            val headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to "$baseurl/",
+                "Accept" to "*/*"
+            )
+
+            val response = app.get(videoApiUrl, headers = headers)
+            val encoded = response.text.trim().replace("\n", "").replace("\r", "")
+            if (encoded.length < 32 || !encoded.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return
+
+            val decryptedtext = AesHelper.decryptaescbc(encoded)
+            if (decryptedtext.isEmpty()) return
+
+            val json = JSONObject(decryptedtext)
+            val sourceurl = json.optString("source", "")
+                .replace("\\/", "/")
+                .replace("https://", "http://")
+            if (sourceurl.isEmpty()) return
+
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = sourceurl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "$baseurl/"
+                    this.quality = Qualities.P1080.value
+                }
+            )
+        } catch (e: Exception) {
+            println("VIDSTACK ERROR -> ${e.message}")
+        }
+    }
+
+    private fun extractId(url: String): String? {
+        return try {
+            val uri = URI(url)
+            val fragment = uri.fragment
+            if (!fragment.isNullOrBlank()) {
+                return fragment.split("&").firstOrNull()?.takeIf { it.length > 1 }
+            }
+            val query = uri.query
+            if (!query.isNullOrBlank()) {
+                val params = query.split("&").associate {
+                    val parts = it.split("=", limit = 2)
+                    if (parts.size == 2) parts[0] to parts[1] else it to ""
+                }
+                params["id"]?.takeIf { it.isNotEmpty() }
+            } else {
+                uri.path.split("/").lastOrNull()?.takeIf { it.length > 1 }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun getBaseUrl(url: String): String {
+        return try {
+            val uri = URI(url)
+            "${uri.scheme}://${uri.host}"
+        } catch (_: Exception) {
+            mainUrl
+        }
+    }
+}
+
+object AesHelper {
+    private const val cbctransformation = "AES/CBC/PKCS5Padding"
+    private const val key = "kiemtienmua911ca"
+    private val iv = "1234567890oiuytr".toByteArray(Charsets.UTF_8)
+
+    fun decryptaescbc(inputhex: String): String {
+        return try {
+            val cipher = Cipher.getInstance(cbctransformation)
+            val secretkey = SecretKeySpec(key.toByteArray(Charsets.UTF_8), "AES")
+            val ivspec = IvParameterSpec(iv)
+            cipher.init(Cipher.DECRYPT_MODE, secretkey, ivspec)
+            val decryptedbytes = cipher.doFinal(inputhex.hextobytearray())
+            String(decryptedbytes, Charsets.UTF_8)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun String.hextobytearray(): ByteArray {
+        val clean = this.replace(Regex("[^0-9a-fA-F]"), "")
+        val len = clean.length
+        val data = ByteArray(len / 2)
+        for (i in 0 until len step 2) {
+            data[i / 2] = ((Character.digit(clean[i], 16) shl 4) + Character.digit(clean[i + 1], 16)).toByte()
+        }
+        return data
+    }
+}
+
+// ===================== PIXELDRAIN =====================
+class PixelDrainLatanime {
+    private val name = "PixelDrain"
+    private val mainUrl = "https://pixeldrain.com"
+
+    suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val clean = url.split("|").firstOrNull()?.trim().orEmpty()
+            if (clean.isBlank()) return false
+
+            val id = Regex("""/u/([A-Za-z0-9]+)""").find(clean)?.groupValues?.getOrNull(1)
+                ?: Regex("""/api/file/([A-Za-z0-9]+)""").find(clean)?.groupValues?.getOrNull(1)
+                ?: clean.substringAfterLast("/")
+                    .substringBefore("?")
+                    .substringBefore("#")
+                    .trim()
+                    .takeIf { it.matches(Regex("""[A-Za-z0-9]+""")) }
+
+            if (id.isNullOrBlank()) return false
+
+            val finalUrl = "$mainUrl/api/file/$id?download"
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = finalUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to "$mainUrl/",
+                        "Accept" to "*/*"
+                    )
+                }
+            )
+            true
+        } catch (e: Exception) {
+            println("PIXELDRAIN ERROR -> ${e.message}")
+            false
+        }
+    }
+}
+

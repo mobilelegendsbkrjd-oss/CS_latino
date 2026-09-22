@@ -329,23 +329,26 @@ class Latanime : MainAPI() {
                 // PIXELDRAIN
                 // ===================================================
                 if (resolvedUrl!!.contains("pixeldrain.com", true)) {
-                    val id = resolvedUrl!!
-                        .substringAfterLast("/")
-                        .trim()
-
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = preferredDisplay.ifBlank { "LAT[Pixeldrain]" },
-                            url = "https://pixeldrain.com/api/file/$id?download",
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            referer = data
-                            quality = Qualities.Unknown.value
-                        }
-                    )
-
-                    found = true
+                    val id = extractPixelDrainId(resolvedUrl!!)
+                    if (!id.isNullOrBlank()) {
+                        callback.invoke(
+                            newExtractorLink(
+                                source = name,
+                                name = preferredDisplay.ifBlank { "LAT[Pixeldrain]" },
+                                url = "https://pixeldrain.com/api/file/$id?download",
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = "https://pixeldrain.com/"
+                                this.quality = Qualities.Unknown.value
+                                this.headers = mapOf(
+                                    "User-Agent" to USER_AGENT,
+                                    "Referer" to "https://pixeldrain.com/",
+                                    "Accept" to "*/*"
+                                )
+                            }
+                        )
+                        found = true
+                    }
                     return@forEach
                 }
 
@@ -416,23 +419,26 @@ class Latanime : MainAPI() {
                     val dlName = "$dlLang[$dlServer]"
 
                     if (fixedUrl.contains("pixeldrain.com", true)) {
-                        val id = fixedUrl
-                            .substringAfterLast("/")
-                            .trim()
-
-                        callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name = dlName,
-                                url = "https://pixeldrain.com/api/file/$id?download",
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                referer = data
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-
-                        found = true
+                        val id = extractPixelDrainId(fixedUrl)
+                        if (!id.isNullOrBlank()) {
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = name,
+                                    name = dlName,
+                                    url = "https://pixeldrain.com/api/file/$id?download",
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = "https://pixeldrain.com/"
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf(
+                                        "User-Agent" to USER_AGENT,
+                                        "Referer" to "https://pixeldrain.com/",
+                                        "Accept" to "*/*"
+                                    )
+                                }
+                            )
+                            found = true
+                        }
                     } else {
                         loadExtractor(
                             fixedUrl,
@@ -705,6 +711,30 @@ class Latanime : MainAPI() {
             // Sin indicios en la URL → SUB (no LAT)
             else -> "SUB"
         }
+    }
+
+    /**
+     * Extrae el file id de PixelDrain desde varias formas de URL:
+     * - https://pixeldrain.com/u/XXXX
+     * - https://pixeldrain.com/api/file/XXXX
+     * - https://pixeldrain.com/api/file/XXXX?download
+     * - URL|calidad (estilo byayzen)
+     */
+    private fun extractPixelDrainId(url: String): String? {
+        val clean = url.split("|").firstOrNull()?.trim().orEmpty()
+        if (clean.isBlank()) return null
+
+        Regex("""/u/([A-Za-z0-9]+)""").find(clean)?.groupValues?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+
+        Regex("""/api/file/([A-Za-z0-9]+)""").find(clean)?.groupValues?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+
+        val last = clean.substringAfterLast("/")
+            .substringBefore("?")
+            .substringBefore("#")
+            .trim()
+        return last.takeIf { it.isNotBlank() && it.matches(Regex("""[A-Za-z0-9]+""")) }
     }
 
     /**
