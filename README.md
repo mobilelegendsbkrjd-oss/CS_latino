@@ -57,7 +57,7 @@ SOY MÉXICANO Y AGRADECERIA MUCHO SU APOYO! TODOS LOS CREDITOS DE EXTENSIONES FI
 
 INSTALA ESTA REPO EN CS!!
 
-https://pastebin.com/rR0g0YTK
+https://pastebin.com/raw/rR0g0YTK
 
 ---
 
