@@ -4,10 +4,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
-import kotlin.plus
 
 class Animefenix : MainAPI() {
-    override var mainUrl = "https://animefenix2.tv"
+    override var mainUrl = "https://ww1.animefenix.vip"
     override var name = "Animefenix"
     override var lang = "mx"
     override val hasMainPage = true
@@ -20,17 +19,20 @@ class Animefenix : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/directorio/anime?tipo=1&idioma=2&q=&p=" to "Anime Doblado",
-        "$mainUrl/directorio/anime?idioma=1&q=&p=" to "Anime Subtitulado",
-        "$mainUrl/directorio/anime?tipo=2&idioma=2&q=&p=" to "Películas Doblado",
-        "$mainUrl/directorio/anime?tipo=2&idioma=1&q=&p=" to "Películas Subtitulado",
-        "$mainUrl/directorio/anime?estreno=2025&p=" to "Estrenos 2025",
-        "$mainUrl/directorio/anime?estreno=2026&p=" to "Estrenos 2026"
+        "$mainUrl/" to "Últimos episodios",
+        "$mainUrl/animes?estado=emision" to "En emisión",
+        "$mainUrl/animes?estado=finalizado" to "Finalizados",
+        "$mainUrl/animes?tipo=tv" to "Series TV",
+        "$mainUrl/animes?tipo=pelicula" to "Películas",
+        "$mainUrl/animes?ano=2026" to "Estrenos 2026",
+        "$mainUrl/animes?ano=2025" to "Estrenos 2025"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(request.data + page, headers = afHeaders).document
-        val items = doc.select("li article, .grid-animes li, article, .carousel-item")
+        val url = if (page > 1) "${request.data}${if (request.data.contains("?")) "&" else "?"}p=$page" else request.data
+        val doc = app.get(url, headers = afHeaders).document
+
+        val items = doc.select("article.li, .ul .li, .grid-animes li, .carousel-item")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -41,8 +43,8 @@ class Animefenix : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/directorio/anime?q=$query&p=1", headers = afHeaders).document
-        return doc.select("li article, .grid-animes li, article, .carousel-item")
+        val doc = app.get("$mainUrl/animes?buscar=${query.replace(" ", "+")}", headers = afHeaders).document
+        return doc.select("article.li, .ul .li")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
     }
@@ -57,13 +59,21 @@ class Animefenix : MainAPI() {
 
     private fun Element.toSearchResult(): SearchResponse? {
         val a = selectFirst("a[href]") ?: return null
-
-        val title = selectFirst("h3, p:not(.gray)")?.text()?.trim()
+        val title = selectFirst("h3 a, h3, .h a")?.text()?.trim()
             ?: a.attr("title").trim()
             ?: return null
 
-        var href = a.attr("href").ifBlank { return null }
+        var href = a.attr("abs:href").ifBlank { a.attr("href") }
         if (href.startsWith("/")) href = "$mainUrl$href"
+        // Limpiar URLs de episodios para que apunten a la serie
+        if (href.contains("/ver/")) {
+            val parts = href.substringAfter("/ver/").split("-")
+            if (parts.size >= 2) {
+                val slug = parts.dropLast(2).joinToString("-")
+                val code = parts.last()
+                href = "$mainUrl/$slug-$code"
+            }
+        }
 
         return newTvSeriesSearchResponse(title, href, TvType.Anime) {
             posterUrl = getImage()
@@ -72,21 +82,19 @@ class Animefenix : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = afHeaders).document
-        val slug = url.substringBefore("?").substringAfterLast("/")
 
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: "Animefenix"
 
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("#anime_image")?.attr("src")
+            ?: doc.selectFirst(".inf-a img, #anime_image")?.attr("data-src")
+            ?: doc.selectFirst(".inf-a img")?.attr("src")
 
-        val plot = doc.selectFirst("meta[name=description]")?.attr("content")
-            ?: doc.selectFirst("h2:contains(Sinopsis) + p")?.text()
-            ?: doc.selectFirst("p.text-gray-300")?.text()
+        val plot = doc.selectFirst(".tx p, .inf-b .tx p")?.text()?.trim()
+            ?: doc.selectFirst("meta[name=description]")?.attr("content")
 
-        val statusText = doc.selectFirst("span.font-semibold, a[href*=estado]")?.text().orEmpty()
-
+        val statusText = doc.selectFirst(".inf-a span, .lu li:contains(Estado)")?.text().orEmpty()
         val status = when {
             statusText.contains("emision", true) || statusText.contains("emisión", true) -> ShowStatus.Ongoing
             statusText.contains("finalizado", true) -> ShowStatus.Completed
@@ -95,58 +103,47 @@ class Animefenix : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        fun parseEpisodesFrom(htmlDoc: org.jsoup.nodes.Document) {
-            htmlDoc.select("a.episode-card[href], a[href*=/ver/]").forEach { a ->
-                var epUrl = a.attr("abs:href").ifBlank { a.attr("href") }
-                if (epUrl.startsWith("/")) epUrl = "$mainUrl$epUrl"
-                if (!epUrl.contains("/ver/")) return@forEach
+        // Método principal: script var eps = [["4","tPGs"], ...]
+        val epsScript = doc.select("script").map { it.data() }.firstOrNull { it.contains("var eps =") }
+        val slug = doc.selectFirst("[data-sl]")?.attr("data-sl")
+            ?: url.substringAfterLast("/").substringBeforeLast("-")
 
-                val epTitle = a.selectFirst(".ep-title")?.text()?.trim()
-                    ?: a.attr("title").trim()
-                    ?: a.selectFirst("img")?.attr("alt")?.trim()
-                    ?: "Capítulo"
+        if (epsScript != null) {
+            val epsMatch = Regex("""var\s+eps\s*=\s*(\[.*?\]);""", RegexOption.DOT_MATCHES_ALL)
+                .find(epsScript)?.groupValues?.getOrNull(1)
 
-                val epNum = Regex("""(?:Capítulo|Capitulo|Episodio|Ep\.?)\s*(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(epTitle)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-                    ?: Regex("""-(\d+)$""")
-                        .find(epUrl.substringBefore("?"))
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-
-                episodes.add(
-                    newEpisode(epUrl) {
-                        name = epTitle
-                        episode = epNum
-                        posterUrl = a.selectFirst("img")?.attr("abs:src")
-                            ?: a.selectFirst("img")?.attr("src")
-                    }
-                )
+            if (epsMatch != null) {
+                val pairs = Regex("""\["(\d+)","([^"]+)"\]""").findAll(epsMatch)
+                pairs.forEach { match ->
+                    val epNum = match.groupValues[1].toIntOrNull()
+                    val code = match.groupValues[2]
+                    val epUrl = "$mainUrl/ver/$slug-$epNum-$code"
+                    episodes.add(
+                        newEpisode(epUrl) {
+                            name = "Episodio $epNum"
+                            episode = epNum
+                        }
+                    )
+                }
             }
         }
 
-        parseEpisodesFrom(doc)
+        // Fallback: links directos
+        if (episodes.isEmpty()) {
+            doc.select("#eplist a[href*=/ver/], a[href*=/ver/]").forEach { a ->
+                var epUrl = a.attr("abs:href").ifBlank { a.attr("href") }
+                if (epUrl.startsWith("/")) epUrl = "$mainUrl$epUrl"
+                val epNum = Regex("""-(\d+)-[a-zA-Z0-9]+$""").find(epUrl)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: Regex("""(?:Episodio|Capítulo|Capitulo)\s*(\d+)""", RegexOption.IGNORE_CASE)
+                        .find(a.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
 
-        val starts = doc.select(".episode-btn[onclick]")
-            .mapNotNull {
-                Regex("""loadEpisodes\((\d+)""")
-                    .find(it.attr("onclick"))
-                    ?.groupValues
-                    ?.getOrNull(1)
+                episodes.add(
+                    newEpisode(epUrl) {
+                        name = a.text().trim().ifBlank { "Episodio $epNum" }
+                        episode = epNum
+                    }
+                )
             }
-            .ifEmpty { listOf("0") }
-            .distinct()
-
-        starts.forEach { start ->
-            val epDoc = app.get(
-                "$url?id=$slug&load=episodes&start=$start",
-                headers = afHeaders + ("X-Requested-With" to "XMLHttpRequest")
-            ).document
-
-            parseEpisodesFrom(epDoc)
         }
 
         return newTvSeriesLoadResponse(
@@ -155,9 +152,17 @@ class Animefenix : MainAPI() {
             TvType.Anime,
             episodes.distinctBy { it.data }.sortedBy { it.episode ?: 0 }
         ) {
-            posterUrl = poster
+            this.posterUrl = poster
             this.plot = plot
-            showStatus = status
+            this.showStatus = status
+        }
+    }
+
+    private fun hex2a(hex: String): String {
+        return try {
+            hex.chunked(2).map { it.toInt(16).toChar() }.joinToString("")
+        } catch (_: Exception) {
+            ""
         }
     }
 
@@ -168,81 +173,126 @@ class Animefenix : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val pageUrl = if (data.startsWith("/")) "$mainUrl$data" else data
+        val doc = app.get(pageUrl, headers = afHeaders + ("Referer" to mainUrl)).document
 
-        val doc = app.get(
-            pageUrl,
-            headers = afHeaders + ("Referer" to mainUrl)
-        ).document
+        val servers = mutableListOf<Triple<String, String, String>>() // name, url, tipo (VIP/FREE)
 
-        val script = doc.selectFirst("script:containsData(var tabsArray)")
-            ?.data()
-            ?: return false
+        // 1. Servidores del AJAX (los que tienen star="1" son VIP)
+        val encrypt = doc.selectFirst("ul.opt[data-encrypt]")?.attr("data-encrypt")
+        if (!encrypt.isNullOrBlank()) {
+            val optHtml = app.post(
+                "$mainUrl/fnx",
+                headers = afHeaders + mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer" to pageUrl,
+                    "Content-Type" to "application/x-www-form-urlencoded"
+                ),
+                data = mapOf("acc" to "opt", "i" to encrypt)
+            ).text
 
-        val servers = mutableListOf<Pair<String, String>>()
-
-        val names = doc.select(".episode-page__servers-list li a").map {
-            it.select("span").last()?.text()?.trim()
-                ?: it.attr("title").trim()
-                ?: "Servidor"
-        }
-
-        val urls = script
-            .substringAfter("<iframe")
-            .split("src='")
-            .drop(1)
-            .map {
-                it.substringBefore("'")
-                    .substringAfter("redirect.php?id=")
+            // Capturamos si tiene star="1"
+            Regex("""<li[^>]*?(?:star="1")?[^>]*encrypt="([0-9a-fA-F]+)"[^>]*title="([^"]*)"""").findAll(optHtml).forEach { m ->
+                val fullMatch = m.value
+                val isVip = fullMatch.contains("star=\"1\"")
+                val url = hex2a(m.groupValues[1])
+                var name = m.groupValues[2]
+                    .replace("Opción ", "", true)
+                    .replace(Regex("""\s+\d+$"""), "")
                     .trim()
-            }
+                    .ifBlank { "Servidor" }
 
-        val count = minOf(urls.size, names.size)
+                // Limpiamos nombres feos
+                name = when {
+                    name.contains("filemoon", true) -> "Filemoon"
+                    name.contains("byse", true) -> "Byse"
+                    name.contains("dood", true) -> "Doodstream"
+                    name.contains("lulu", true) -> "Lulustream"
+                    name.contains("voe", true) -> "Voe"
+                    name.contains("uqload", true) -> "Uqload"
+                    name.contains("mp4upload", true) -> "Mp4upload"
+                    name.contains("mixdrop", true) -> "Mixdrop"
+                    else -> name
+                }
 
-        for (i in 0 until count) {
-            val name = names[i].ifBlank { "Servidor" }
-            val url = urls[i]
-            if (url.startsWith("http")) {
-                servers.add(name to url)
-            }
-        }
-
-        // Links de descarga: en esta peli traen StreamTape y Voex, útiles como fallback.
-        doc.select("a[href*=smart.php?url=]").forEach { a ->
-            val name = a.text().replace("Descargas", "", true).trim().ifBlank { "Descarga" }
-            val url = a.attr("href")
-                .substringAfter("smart.php?url=")
-                .trim()
-
-            if (url.startsWith("http")) {
-                servers.add(name to url)
+                if (url.startsWith("http")) {
+                    val tipo = if (isVip) "VIP" else "FREE"
+                    servers.add(Triple(name, url, tipo))
+                }
             }
         }
 
-        fun priority(item: Pair<String, String>): Int {
-            val name = item.first.lowercase()
-            val url = item.second.lowercase()
+        // 2. Links de descarga (siempre FREE)
+        val dwn = doc.selectFirst("ul.dw[data-dwn]")?.attr("data-dwn")
+        if (!dwn.isNullOrBlank()) {
+            dwn.split(",").forEach { raw ->
+                val url = raw.trim()
+                if (url.startsWith("http")) {
+                    val name = when {
+                        url.contains("filemoon") || url.contains("bysesukior") -> "Filemoon"
+                        url.contains("dood") -> "Doodstream"
+                        url.contains("streamwish") || url.contains("dhcplay") -> "Streamwish"
+                        url.contains("voe") -> "Voe"
+                        url.contains("mixdrop") -> "Mixdrop"
+                        url.contains("mp4upload") -> "Mp4upload"
+                        url.contains("uqload") -> "Uqload"
+                        url.contains("lulu") -> "Lulustream"
+                        else -> "Descarga"
+                    }
+                    servers.add(Triple(name, url, "FREE"))
+                }
+            }
+        }
 
-            return when {
-                name.contains("streamtape") || url.contains("streamtape") -> 1
-                name.contains("voe") || name.contains("voex") || url.contains("voe") -> 2
-                name.contains("uqload") || url.contains("uqload") -> 3
-                name.contains("streamsb") || url.contains("streamsb") || url.contains("viewsb") -> 4
-                name.contains("streamhide") || url.contains("ahvsh") -> 5
-                name.contains("plus") || url.contains("ironhentai") -> 6
-                name.contains("netu") || url.contains("hqq") || url.contains("waaw") -> 99
+        // Prioridad: VIP primero, luego por servidor
+        fun priority(item: Triple<String, String, String>): Int {
+            val (name, url, tipo) = item
+            val base = when {
+                name.contains("Filemoon", true) || url.contains("filemoon") || url.contains("bysesukior") -> 1
+                name.contains("Streamwish", true) || url.contains("streamwish") || url.contains("dhcplay") -> 2
+                name.contains("Voe", true) || url.contains("voe") -> 3
+                name.contains("Dood", true) || url.contains("dood") -> 4
+                name.contains("Mixdrop", true) || url.contains("mixdrop") -> 5
+                name.contains("Mp4upload", true) || url.contains("mp4upload") -> 6
+                name.contains("Uqload", true) || url.contains("uqload") -> 7
+                name.contains("Lulu", true) || url.contains("lulu") -> 8
                 else -> 20
             }
+            return if (tipo == "VIP") base else base + 100
         }
 
         val finalServers = servers
-            .distinctBy { it.second }
+            .distinctBy { it.second } // evitamos duplicados por URL
             .sortedBy { priority(it) }
 
         var found = false
 
-        finalServers.forEach { (_, rawUrl) ->
+        for ((name, rawUrl, tipo) in finalServers) {
             try {
-                if (UniversalVideoResolver.resolve(rawUrl, pageUrl, subtitleCallback, callback)) {
+                val cleanUrl = when {
+                    rawUrl.contains("bysesukior.com/d/") -> rawUrl.replace("/d/", "/e/")
+                    rawUrl.contains("doodstream.com/d/") -> rawUrl.replace("/d/", "/e/")
+                    rawUrl.contains("dhcplay.com/f/") -> rawUrl.replace("/f/", "/e/")
+                    else -> rawUrl
+                }
+
+                val displayName = "[$tipo] $name"
+
+                val wrappedCallback: (ExtractorLink) -> Unit = { link ->
+                    callback.invoke(
+                        ExtractorLink(
+                            source = link.source,
+                            name = displayName,
+                            url = link.url,
+                            referer = link.referer,
+                            quality = link.quality,
+                            type = link.type,
+                            headers = link.headers,
+                            extractorData = link.extractorData
+                        )
+                    )
+                }
+
+                if (UniversalVideoResolver.resolve(cleanUrl, pageUrl, subtitleCallback, wrappedCallback)) {
                     found = true
                 }
             } catch (_: Exception) {

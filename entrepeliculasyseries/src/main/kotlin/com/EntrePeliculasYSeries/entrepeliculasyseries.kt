@@ -3,6 +3,7 @@ package com.EntrePeliculasYSeries
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 
@@ -93,14 +94,17 @@ class EntrePeliculasYSeries : MainAPI() {
             }
         }
 
-        // --- CAMBIO CLAVE: Extraer episodios desde los enlaces con hash ---
         val episodeElements = doc.select("a[data-episode-link]")
         val episodes = episodeElements.mapNotNull { el ->
             val season = el.attr("data-season").toIntOrNull() ?: return@mapNotNull null
             val episode = el.attr("data-episode").toIntOrNull() ?: return@mapNotNull null
+            val href = el.attr("href")
             val epName = el.selectFirst("div")?.text()?.trim() ?: "Episodio $episode"
-            // Construir URL con hash para que loadLinks sepa qué episodio es
-            val epUrl = "$url#s$season-e$episode"
+            val epUrl = when {
+                href.contains("#s") -> fixUrl(href)
+                href.contains("/capitulo/") -> "$url#s$season-e$episode"
+                else -> "$url#s$season-e$episode"
+            }
             newEpisode(epUrl) {
                 name = epName
                 this.season = season
@@ -122,7 +126,6 @@ class EntrePeliculasYSeries : MainAPI() {
     ): Boolean {
         println("[Main] loadLinks -> $data")
 
-        // data puede ser: https://entrepeliculasyseries.nz/serie/slug#s1-e1
         val baseUrl = data.substringBefore("#")
         val hash = data.substringAfter("#", "")
 
@@ -131,7 +134,6 @@ class EntrePeliculasYSeries : MainAPI() {
         val type = context?.attr("data-type") ?: "serie"
         val slug = context?.attr("data-slug") ?: return false
 
-        // Parsear temporada/episodio del hash
         var season = 1
         var episode = 1
         if (hash.isNotEmpty()) {
@@ -149,32 +151,45 @@ class EntrePeliculasYSeries : MainAPI() {
 
         val links = mutableSetOf<String>()
 
-        // --- CAMBIO CLAVE: Consultar la API de bootstrap ---
         try {
-            val apiUrl = "$mainUrl/api/bootstrap/$type/$slug"
-            val response = app.get(apiUrl, headers = mapOf("Accept" to "application/json")).text
+            val apiUrl = "$mainUrl/api/episodio/$type/$slug/$season/$episode"
+            val response = app.get(
+                apiUrl,
+                headers = mapOf(
+                    "Accept" to "application/json",
+                    "Referer" to baseUrl
+                )
+            ).text
             println("[loadLinks] API response: ${response.take(500)}")
 
             val json = JSONObject(response)
-            extractLinksFromJson(json, season, episode, links)
+            if (json.optBoolean("success", false)) {
+                val html = json.optString("html", "")
+                if (html.isNotBlank()) {
+                    val frag = Jsoup.parse(html)
+                    frag.select("iframe[src]").forEach { iframe ->
+                        val src = iframe.attr("src")
+                        if (src.isNotBlank()) links.add(fixUrl(src))
+                    }
+                    frag.select("[data-url]").forEach { btn ->
+                        val u = btn.attr("data-url")
+                        if (u.isNotBlank()) links.add(fixUrl(u))
+                    }
+                }
+            }
         } catch (e: Exception) {
             println("[loadLinks] Error API: ${e.message}")
         }
 
-        // Fallback: buscar en el HTML de la página
         if (links.isEmpty()) {
             val html = document.html()
             document.select("iframe").forEach {
                 val src = it.attr("src")
-                if (src.isNotBlank()) links.add(cleanUrl(src))
+                if (src.isNotBlank()) links.add(cleanUrl(fixUrl(src)))
             }
             Regex("""https?://[^\s'"]+\.(m3u8|mp4)""").findAll(html).forEach {
                 links.add(cleanUrl(it.value))
             }
-            Regex("""https?://[^\s'"]+(vidhide|filemoon|voe|wish|streamwish|dood|xupalace|embed69)[^\s'"]*""")
-                .findAll(html).forEach {
-                    links.add(cleanUrl(it.value))
-                }
         }
 
         println("[loadLinks] encontrados: ${links.size}")
@@ -183,7 +198,6 @@ class EntrePeliculasYSeries : MainAPI() {
             processLink(link, data, subtitleCallback, callback)
         }
 
-        // Fallback final
         if (links.isEmpty()) {
             try {
                 loadExtractor(baseUrl, data, subtitleCallback, callback)
@@ -193,62 +207,93 @@ class EntrePeliculasYSeries : MainAPI() {
         return true
     }
 
-    private fun extractLinksFromJson(json: JSONObject, season: Int, episode: Int, links: MutableSet<String>) {
-        fun scan(obj: Any?) {
-            when (obj) {
-                is JSONObject -> {
-                    for (key in obj.keys()) {
-                        scan(obj.get(key))
-                    }
-                }
-                is org.json.JSONArray -> {
-                    for (i in 0 until obj.length()) {
-                        scan(obj.get(i))
-                    }
-                }
-                is String -> {
-                    if (obj.startsWith("http") && (obj.contains("embed") || obj.contains("player") || obj.contains("vid") || obj.endsWith(".m3u8") || obj.endsWith(".mp4"))) {
-                        val lower = obj.lowercase()
-                        // Filtrar por temporada/episodio si el string los contiene
-                        if ((lower.contains("s${season}e$episode") || lower.contains("t${season}e$episode") ||
-                                    (lower.contains("season") && lower.contains("$season") && lower.contains("episode") && lower.contains("$episode"))) ||
-                            (!lower.contains("s") && !lower.contains("e"))) {
-                            links.add(obj)
-                        }
-                    }
-                }
-            }
-        }
-        scan(json)
-    }
-
     private fun linkPriority(url: String): Int {
         return when {
             url.contains("vidhide") -> 0
             url.contains("filemoon") -> 1
             url.contains("embed69") -> 2
             url.contains("xupalace") -> 3
-            url.contains("streamwish") -> 4
-            url.contains("voe") -> 5
+            url.contains("streamwish") || url.contains("audinifer") || url.contains("hglink") -> 4
+            url.contains("voe") || url.contains("shannoncold") -> 5
             url.contains("dood") -> 6
             else -> 10
         }
     }
 
-    private suspend fun processLink(url: String, referer: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+    private suspend fun processLink(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
         if (url.isBlank()) return
         val finalUrl = cleanUrl(if (url.startsWith("//")) "https:$url" else url)
         println("[loadLinks] procesando -> $finalUrl")
+
+        if (finalUrl.contains("/vidurl/")) {
+            try {
+                val html = app.get(
+                    finalUrl,
+                    headers = mapOf(
+                        "Referer" to referer,
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    )
+                ).text
+
+                val doc = Jsoup.parse(html, finalUrl)
+                var found = false
+
+                doc.select("iframe[src]").forEach { iframe ->
+                    val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
+                    if (src.startsWith("http")) {
+                        found = true
+                        try {
+                            loadExtractor(src, finalUrl, subtitleCallback, callback)
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                Regex("""https?://[^\s"'<>]+(?:vidhide|filemoon|voe|streamwish|dood|xupalace|embed69)[^\s"'<>]*""")
+                    .findAll(html).forEach { m ->
+                        found = true
+                        try {
+                            loadExtractor(m.value, finalUrl, subtitleCallback, callback)
+                        } catch (_: Exception) {}
+                    }
+
+                if (!found) {
+                    Embed69Extractor.load(finalUrl, referer, subtitleCallback, callback)
+                }
+                return
+            } catch (e: Exception) {
+                println("[loadLinks] /vidurl/ error: ${e.message}")
+                return
+            }
+        }
+
+        // Aquí usamos los nuevos extractores propios
         try {
             when {
-                finalUrl.contains("dood", true) || finalUrl.contains("ds2play", true) || finalUrl.contains("dsvplay", true) -> {
+                finalUrl.contains("vidhide", true) || finalUrl.contains("filelions", true) -> {
+                    EntrePeliculasVidhide().getUrl(finalUrl, referer, subtitleCallback, callback)
+                }
+                finalUrl.contains("voe", true) || finalUrl.contains("shannoncoldalready", true) -> {
+                    EntrePeliculasVoe().getUrl(finalUrl, referer, subtitleCallback, callback)
+                }
+                finalUrl.contains("audinifer", true) || finalUrl.contains("streamwish", true) ||
+                        finalUrl.contains("hglink", true) || finalUrl.contains("swdyu", true) -> {
+                    val code = finalUrl.substringAfterLast("/").substringBefore("?")
+                    val streamWishUrl = "https://streamwish.to/e/$code"
+                    EntrePeliculasStreamWish().getUrl(streamWishUrl, referer, subtitleCallback, callback)
+                }
+                finalUrl.contains("embed69", true) -> {
+                    Embed69Extractor.load(finalUrl, referer, subtitleCallback, callback)
+                }
+                finalUrl.contains("dood", true) || finalUrl.contains("ds2play", true) -> {
                     DoodExtractor().getUrl(finalUrl, referer, subtitleCallback, callback)
                 }
                 finalUrl.contains("xupalace", true) -> {
                     XupalaceExtractor().getUrl(finalUrl, referer, subtitleCallback, callback)
-                }
-                finalUrl.contains("embed69", true) -> {
-                    Embed69Extractor.load(finalUrl, referer, subtitleCallback, callback)
                 }
                 else -> {
                     loadExtractor(finalUrl, referer, subtitleCallback, callback)

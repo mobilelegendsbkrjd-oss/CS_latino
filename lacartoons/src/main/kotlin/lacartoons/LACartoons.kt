@@ -18,62 +18,112 @@ class LACartoons : MainAPI() {
     )
 
     private fun Document.toSearchResult(): List<SearchResponse> {
-        return this.select(".categorias .conjuntos-series a").mapNotNull { it ->
-            val title = it.selectFirst("p.nombre-serie")?.text() ?: return@mapNotNull null
-            val href = fixUrl(it.attr("href"))
-            val img = it.selectFirst("img")?.attr("src") ?: return@mapNotNull null
-            val poster = fixUrl(img)
+        return this.select(".conjuntos-series a, a[href*=/serie/]").mapNotNull { a ->
+            val href = a.attr("href").takeIf { it.contains("/serie/") } ?: return@mapNotNull null
+            // Evitar links de episodios
+            if (href.contains("/capitulo/")) return@mapNotNull null
 
-            newTvSeriesSearchResponse(title, href) {
-                posterUrl = poster
+            val title = a.selectFirst("p.nombre-serie")?.text()?.trim()
+                ?: a.selectFirst(".nombre-serie")?.text()?.trim()
+                ?: a.attr("title")?.trim()
+                ?: a.text().trim()
+                ?: return@mapNotNull null
+
+            if (title.isBlank()) return@mapNotNull null
+
+            val img = a.selectFirst("img")?.attr("src")
+                ?: a.selectFirst("img")?.attr("data-src")
+            val poster = img?.let { fixUrl(it) }
+
+            newTvSeriesSearchResponse(title, fixUrl(href), TvType.Cartoon) {
+                this.posterUrl = poster
             }
-        }
+        }.distinctBy { it.url }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val soup = app.get(mainUrl).document
         val home = soup.toSearchResult()
-        return newHomePageResponse("Series", home)
+        return newHomePageResponse(
+            listOf(HomePageList("Series", home)),
+            hasNext = false
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/?utf8=✓&Titulo=$query").document
+        val doc = app.get("$mainUrl/?utf8=✓&Titulo=${query.replace(" ", "+")}").document
         return doc.toSearchResult()
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        val title = doc.selectFirst("h2.text-center")?.text() ?: "Sin título"
-        val description =
-            doc.selectFirst(".informacion-serie-seccion p:contains(Reseña)")?.text()
-                ?.substringAfter("Reseña:")
-                ?.trim()
+        val title = doc.selectFirst("h2.text-center, h2.subtitulo-linea, .hbtoonh1")?.text()
+            ?.replace(Regex("""\s+"""), " ")
+            ?.trim()
+            ?: "Sin título"
 
-        val poster = doc.selectFirst(".imagen-serie img")?.attr("src")
+        val description = doc.selectFirst(".informacion-serie-seccion p:contains(Reseña), .resena-serie p, .informacion-serie p")
+            ?.text()
+            ?.substringAfter("Reseña:")
+            ?.trim()
+            ?: doc.selectFirst("meta[name=description]")?.attr("content")
+
+        val poster = doc.selectFirst(".imagen-serie img, .serie img")?.attr("src")
+            ?: doc.selectFirst("img.fondo-serie-seccion")?.attr("src")
         val backposter = doc.selectFirst("img.fondo-serie-seccion")?.attr("src")
 
-        val episodes = doc.select("ul.listas-de-episodion li").mapNotNull { li ->
-            val regexep = Regex("Capitulo.(\\d+)|Capitulo.(\\d+)\\-")
-            val a = li.selectFirst("a") ?: return@mapNotNull null
-            val href = fixUrl(a.attr("href"))
-            val rawName = a.text()
-            val name = rawName.replace(regexep, "").replace("-", "").trim()
+        val episodes = mutableListOf<Episode>()
 
-            val seasonNum = href.substringAfter("t=", "").toIntOrNull()
-            val epNum = regexep.find(rawName)?.destructured?.component1()?.toIntOrNull()
+        // Temporadas + episodios
+        doc.select(".listas-de-episodion li a, ul.listas-de-episodion a").forEach { a ->
+            val href = a.attr("href").takeIf { it.isNotBlank() } ?: return@forEach
+            val fullHref = fixUrl(href)
 
-            newEpisode(href) {
-                this.name = name
-                this.season = seasonNum
-                this.episode = epNum
-            }
+            val rawName = a.text().trim()
+            // Extraer número de capítulo
+            val epNum = Regex("""Capitulo\s*(\d+)|Capítulo\s*(\d+)|Episodio\s*(\d+)""", RegexOption.IGNORE_CASE)
+                .find(rawName)
+                ?.groupValues
+                ?.drop(1)
+                ?.firstOrNull { it.isNotBlank() }
+                ?.toIntOrNull()
+                ?: Regex("""/capitulo/(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+
+            val seasonNum = Regex("""[?&]t=(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                ?: 1
+
+            val cleanName = rawName
+                .replace(Regex("""Capitulo\s*\d+\s*-?\s*|Capítulo\s*\d+\s*-?\s*""", RegexOption.IGNORE_CASE), "")
+                .trim()
+                .ifBlank { "Episodio ${epNum ?: "?"}" }
+
+            episodes.add(
+                newEpisode(fullHref) {
+                    this.name = cleanName
+                    this.season = seasonNum
+                    this.episode = epNum
+                }
+            )
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.Cartoon, episodes) {
-            posterUrl = poster?.let { fixUrl(it) }
-            backgroundPosterUrl = backposter?.let { fixUrl(it) }
-            plot = description
+        // Si no hay lista de episodios (estamos en un capítulo individual), crear al menos el actual
+        if (episodes.isEmpty() && url.contains("/capitulo/")) {
+            val epNum = Regex("""/capitulo/(\d+)""").find(url)?.groupValues?.get(1)?.toIntOrNull()
+            val seasonNum = Regex("""[?&]t=(\d+)""").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            episodes.add(
+                newEpisode(url) {
+                    name = "Episodio ${epNum ?: 1}"
+                    season = seasonNum
+                    episode = epNum
+                }
+            )
+        }
+
+        return newTvSeriesLoadResponse(title, url, TvType.Cartoon, episodes.sortedWith(compareBy({ it.season }, { it.episode }))) {
+            this.posterUrl = poster?.let { fixUrl(it) }
+            this.backgroundPosterUrl = backposter?.let { fixUrl(it) }
+            this.plot = description
         }
     }
 
@@ -83,14 +133,72 @@ class LACartoons : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val res = app.get(data).document
-        res.select(".serie-video-informacion iframe").forEach {
-            val link = it.attr("src")
-                ?.replace("https://short.ink/", "https://abysscdn.com/?v=")
-            if (!link.isNullOrBlank()) {
-                loadExtractor(link, data, subtitleCallback, callback)
+        val doc = app.get(data).document
+        var found = false
+
+        // 1) Selectores específicos del HTML real
+        val iframes = doc.select(
+            "section.contenedor-video-recomendaciones iframe, " +
+                    ".serie-video-informacion iframe, " +
+                    ".contenedor-video iframe, " +
+                    "iframe[src*='ok.ru'], " +
+                    "iframe[src*='videoembed'], " +
+                    "iframe[src*='streamtape'], " +
+                    "iframe[src*='dood'], " +
+                    "iframe"
+        ).distinctBy { it.attr("src") + it.attr("data-src") }
+
+        for (iframe in iframes) {
+            var link = iframe.attr("src")
+                .ifBlank { iframe.attr("data-src") }
+                .trim()
+
+            if (link.isBlank() || link.startsWith("about:")) continue
+
+            // Normalizar acortadores
+            link = link
+                .replace("https://short.ink/", "https://abysscdn.com/?v=")
+                .replace("http://", "https://")
+
+            if (!link.startsWith("http")) {
+                link = fixUrl(link)
+            }
+
+            // ok.ru necesita ir directo al extractor, no como iframe genérico
+            if (link.contains("ok.ru")) {
+                // Intentar con loadExtractor
+                if (loadExtractor(link, data, subtitleCallback, callback)) {
+                    found = true
+                    continue
+                }
+                // Fallback manual: extraer el ID y armar URL de embed limpia
+                val okId = Regex("""ok\.ru/(?:videoembed|video)/(\d+)""")
+                    .find(link)?.groupValues?.get(1)
+                if (okId != null) {
+                    val cleanUrl = "https://ok.ru/videoembed/$okId"
+                    if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                        found = true
+                        continue
+                    }
+                }
+            }
+
+            if (loadExtractor(link, data, subtitleCallback, callback)) {
+                found = true
             }
         }
-        return true
+
+        // 2) Fallback: buscar cualquier URL de ok.ru embebida en el HTML crudo
+        if (!found) {
+            val regex = Regex("""https?://(?:www\.)?ok\.ru/(?:videoembed|video)/(\d+)""")
+            regex.findAll(doc.html()).map { it.value }.distinct().forEach { okUrl ->
+                val clean = okUrl.replace("/video/", "/videoembed/")
+                if (loadExtractor(clean, data, subtitleCallback, callback)) {
+                    found = true
+                }
+            }
+        }
+
+        return found
     }
 }

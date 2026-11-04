@@ -26,6 +26,31 @@ class megadede : MainAPI() {
         return null
     }
 
+    /** Quita el hash #sN-eM y normaliza la URL de ficha. */
+    private fun cleanContentUrl(raw: String): String {
+        val noHash = raw.substringBefore("#")
+        return fixUrl(noHash)
+    }
+
+    /** Detecta tipo según la ruta. */
+    private fun typeFromUrl(url: String): TvType = when {
+        url.contains("/pelicula/") -> TvType.Movie
+        url.contains("/anime/") -> TvType.Anime
+        url.contains("/serie/") -> TvType.TvSeries
+        else -> TvType.TvSeries
+    }
+
+    /** Extrae slug y tipo desde una URL de ficha. */
+    private fun parseSlugAndType(url: String): Pair<String, String>? {
+        val path = url.substringAfter(mainUrl).trim('/')
+        val parts = path.split('/')
+        if (parts.size < 2) return null
+        val type = parts[0] // serie | anime | pelicula
+        val slug = parts[1].substringBefore("#")
+        if (slug.isBlank()) return null
+        return type to slug
+    }
+
     /* ===================== HOME ===================== */
 
     override val mainPage = mainPageOf(
@@ -51,22 +76,24 @@ class megadede : MainAPI() {
         val items = doc.select("article.mv, article.mv.v.por").mapNotNull {
             val title = it.selectFirst("h2, h4")?.text()?.trim() ?: return@mapNotNull null
 
-            val link = it.selectFirst("a.lnk-blk")?.attr("href")
+            val rawLink = it.selectFirst("a.lnk-blk")?.attr("href")
                 ?: it.selectFirst("a")?.attr("href")
                 ?: return@mapNotNull null
 
             val poster = getImage(it.selectFirst("img"))
 
-            val type = when {
-                link.contains("/pelicula/") -> TvType.Movie
-                link.contains("/anime/") -> TvType.Anime
-                link.contains("/serie/") -> TvType.TvSeries
-                else -> TvType.TvSeries
-            }
+            // En "Episodios Recientes" el href suele ser /serie/slug#s1-e8
+            // Apuntamos a la ficha de la serie/anime (sin hash) para que load() arme temporadas.
+            val link = cleanContentUrl(rawLink)
+            val type = typeFromUrl(link)
 
-            newTvSeriesSearchResponse(title, fixUrl(link), type) {
+            // Año real o etiqueta tipo T1E8 — solo usamos números de 4 dígitos
+            val yearText = it.selectFirst("span.op6.db.fz6")?.text()?.trim()
+            val year = yearText?.takeIf { y -> y.length == 4 }?.toIntOrNull()
+
+            newTvSeriesSearchResponse(title, link, type) {
                 posterUrl = poster
-                this.year = it.selectFirst("span.op6.db.fz6")?.text()?.toIntOrNull()
+                this.year = year
             }
         }
 
@@ -83,22 +110,20 @@ class megadede : MainAPI() {
         return doc.select("article.mv, article.mv.v.por").mapNotNull {
             val title = it.selectFirst("h2, h4")?.text()?.trim() ?: return@mapNotNull null
 
-            val link = it.selectFirst("a.lnk-blk")?.attr("href")
+            val rawLink = it.selectFirst("a.lnk-blk")?.attr("href")
                 ?: it.selectFirst("a")?.attr("href")
                 ?: return@mapNotNull null
 
+            val link = cleanContentUrl(rawLink)
             val poster = getImage(it.selectFirst("img"))
+            val type = typeFromUrl(link)
 
-            val type = when {
-                link.contains("/pelicula/") -> TvType.Movie
-                link.contains("/anime/") -> TvType.Anime
-                link.contains("/serie/") -> TvType.TvSeries
-                else -> TvType.TvSeries
-            }
+            val yearText = it.selectFirst("span.op6.db.fz6")?.text()?.trim()
+            val year = yearText?.takeIf { y -> y.length == 4 }?.toIntOrNull()
 
-            newTvSeriesSearchResponse(title, fixUrl(link), type) {
+            newTvSeriesSearchResponse(title, link, type) {
                 posterUrl = poster
-                this.year = it.selectFirst("span.op6.db.fz6")?.text()?.toIntOrNull()
+                this.year = year
             }
         }
     }
@@ -106,82 +131,111 @@ class megadede : MainAPI() {
     /* ===================== LOAD ===================== */
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url).document
+        val cleanUrl = cleanContentUrl(url)
+        val doc = app.get(cleanUrl).document
 
-        // Si es un episodio individual
-        if (url.contains("/capitulo/")) {
-            val title = doc.selectFirst("title")
+        // Capítulo individual: /serie|anime/slug/temporada/N/capitulo/M
+        if (cleanUrl.contains("/capitulo/")) {
+            val title = doc.selectFirst("h1, h2, title")
                 ?.text()
                 ?.substringBefore(" -")
+                ?.substringBefore(" |")
+                ?.trim()
                 ?: "Episodio"
 
-            val poster = getImage(doc.selectFirst("figure.im img"))
+            val poster = getImage(
+                doc.selectFirst(".movie-poster img")
+                    ?: doc.selectFirst("figure.im img")
+            )
 
-            return newMovieLoadResponse(title, url, TvType.TvSeries, url) {
+            return newMovieLoadResponse(title, cleanUrl, TvType.TvSeries, cleanUrl) {
                 posterUrl = poster
                 backgroundPosterUrl = poster
             }
         }
 
-        val title = doc.selectFirst("h1, h2")?.text() ?: return null
+        val title = doc.selectFirst("h1, h2")?.text()?.trim() ?: return null
         val poster = getImage(
             doc.selectFirst(".movie-poster img")
                 ?: doc.selectFirst("figure.im img")
                 ?: doc.selectFirst("div.poster img")
         )
 
-        // Extraer año
         val year = doc.selectFirst(".movie-meta span:containsOwn(20)")?.text()?.toIntOrNull()
             ?: doc.selectFirst("span.op6.db.fz6")?.text()?.toIntOrNull()
 
-        // Extraer descripción
         val description = doc.selectFirst("h2.description")?.text()?.trim()
             ?: doc.selectFirst("meta[property='og:description']")?.attr("content")?.trim()
 
-        // Extraer episodios por temporadas
+        // Contexto de la ficha (serie / anime)
+        val ctx = doc.selectFirst("#item-context")
+        val contentType = ctx?.attr("data-type")?.ifBlank { null }
+            ?: when {
+                cleanUrl.contains("/anime/") -> "anime"
+                cleanUrl.contains("/serie/") -> "serie"
+                else -> null
+            }
+        val slug = ctx?.attr("data-slug")?.ifBlank { null }
+            ?: parseSlugAndType(cleanUrl)?.second
+
         val episodes = mutableListOf<Episode>()
 
-        doc.select(".season-container").forEach { seasonContainer ->
+        if (contentType != null && slug != null && (contentType == "serie" || contentType == "anime")) {
+            // Episodios vienen como <a class="episode-card" data-season="1" data-episode="3" href="...#s1-e3">
+            // No tienen URL real de stream: hay que construir /tipo/slug/temporada/S/capitulo/E
+            doc.select(".season-container").forEach { seasonContainer ->
+                val seasonFromContainer =
+                    seasonContainer.attr("data-season").toIntOrNull()
 
-            val seasonNumber =
-                seasonContainer.attr("data-season")?.toIntOrNull() ?: return@forEach
+                seasonContainer.select("a.episode-card, .episode-card").forEach { epEl ->
+                    val season = epEl.attr("data-season").toIntOrNull()
+                        ?: seasonFromContainer
+                        ?: return@forEach
 
-            seasonContainer.select(".episode-card").forEach { episodeElement ->
+                    val episode = epEl.attr("data-episode").toIntOrNull()
+                        ?: epEl.selectFirst(".fz5")
+                            ?.text()
+                            ?.replace(Regex("""(?i)ep\.?\s*"""), "")
+                            ?.trim()
+                            ?.toIntOrNull()
+                        ?: return@forEach
 
-                val episodeUrl = episodeElement.attr("href")
+                    val episodeTitle = epEl.selectFirst("p")?.text()?.trim()
+                        ?: "Episodio $episode"
 
-                val episodeNumber =
-                    episodeElement.selectFirst(".fz5")
-                        ?.text()
-                        ?.replace("Ep", "")
-                        ?.trim()
-                        ?.toIntOrNull()
+                    // URL real del capítulo (página con el player)
+                    val episodeUrl =
+                        "$mainUrl/$contentType/$slug/temporada/$season/capitulo/$episode"
 
-                val episodeTitle =
-                    episodeElement.selectFirst("p")
-                        ?.text()
-                        ?.trim()
-                        ?: "Episodio $episodeNumber"
-
-                episodes.add(
-                    newEpisode(fixUrl(episodeUrl)) {
-                        this.season = seasonNumber       // ✅ TEMPORADA REAL
-                        this.episode = episodeNumber    // ✅ EP REAL
-                        this.name = episodeTitle
-                    }
-                )
+                    episodes.add(
+                        newEpisode(episodeUrl) {
+                            this.season = season
+                            this.episode = episode
+                            this.name = episodeTitle
+                        }
+                    )
+                }
             }
-        } 
+
+            // Fallback: si no hay .season-container, intentar botones de temporada + API no hace falta
+            // porque sin cards no hay lista visible.
+        }
+
+        val tvType = when (contentType) {
+            "anime" -> TvType.Anime
+            "serie" -> TvType.TvSeries
+            else -> if (episodes.isNotEmpty()) TvType.TvSeries else TvType.Movie
+        }
 
         return if (episodes.isNotEmpty()) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            newTvSeriesLoadResponse(title, cleanUrl, tvType, episodes) {
                 posterUrl = poster
                 backgroundPosterUrl = poster
                 this.year = year
                 plot = description
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
+            newMovieLoadResponse(title, cleanUrl, TvType.Movie, cleanUrl) {
                 posterUrl = poster
                 backgroundPosterUrl = poster
                 this.year = year
@@ -256,43 +310,47 @@ class megadede : MainAPI() {
                         subtitleCallback,
                         callback
                     )
-
                     if (ok) found = true
                 }
             }
         }
 
-        // iframe principal:
-        // <iframe id="player" src="https://xupalace.org/video/tt0898266-1x01/">
+        // iframe principal (#player o #player-iframe)
         doc.select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
                 .ifBlank { iframe.attr("data-src") }
                 .trim()
 
-            if (src.isNotBlank() && !src.startsWith("blob:", true)) {
+            if (src.isNotBlank()
+                && !src.startsWith("blob:", true)
+                && !src.contains("youtube", true)
+                && !src.contains("about:blank", true)
+            ) {
                 handle(src)
             }
         }
 
-        // botones Megadede:
-        // changeServer('/vidurl/...')
-        doc.select("button.server-btn").forEach { btn ->
+        // Botones clásicos: changeServer('/vidurl/...')
+        doc.select("button.server-btn, button.ep-player__btn, .player-tab").forEach { btn ->
             val onclick = btn.attr("onclick")
+            val dataUrl = btn.attr("data-url")
 
-            val serverUrl = Regex("""changeServer\(['"]([^'"]+)['"]""")
-                .find(onclick)
-                ?.groupValues
-                ?.getOrNull(1)
+            val serverUrl = when {
+                dataUrl.isNotBlank() -> dataUrl
+                else -> Regex("""changeServer\(['"]([^'"]+)['"]""")
+                    .find(onclick)
+                    ?.groupValues
+                    ?.getOrNull(1)
+            }
 
             if (!serverUrl.isNullOrBlank()) {
                 handle(serverUrl)
             }
         }
 
-        // directos por si aparecen
+        // <video source>
         doc.select("video source").forEach { source ->
             val src = source.attr("src").trim()
-
             if (src.isNotBlank() && !src.startsWith("blob:", true)) {
                 handle(src)
             }

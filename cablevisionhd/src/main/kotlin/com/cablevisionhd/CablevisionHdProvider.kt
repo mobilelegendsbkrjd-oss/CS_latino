@@ -19,8 +19,9 @@ class CablevisionHdProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.Live)
 
+    // Ahora apuntamos directamente a la parrilla
     override val mainPage = mainPageOf(
-        "$mainUrl" to "Canales"
+        "$mainUrl/parrilla-directo.php" to "Canales"
     )
 
     private val USER_AGENT =
@@ -32,90 +33,69 @@ class CablevisionHdProvider : MainAPI() {
     )
 
     // =====================================================
-    // PARSE CHANNELS
+    // PARSE CHANNELS (actualizado)
     // =====================================================
 
     private fun parseChannels(doc: Document): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
 
-        doc.select("script").forEach { script ->
-            val data = script.data().ifBlank { script.html() }
+        // Nueva estructura: <a href="...-ver.php"> <img ...> Nombre </a>
+        doc.select("a[href*=-ver.php], a[href*=ver.php]").forEach { a ->
+            val link = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
+            val img = a.selectFirst("img")
 
-            if (data.contains("homeChannels", true) || data.contains("const channels", true)) {
-                try {
-                    val blocks = Regex("""`([\s\S]*?)`""")
-                        .findAll(data)
-                        .map { it.groupValues[1] }
-                        .toList()
-
-                    for (block in blocks) {
-                        if (block.length <= 100) continue
-
-                        val scriptDoc = Jsoup.parse(block, mainUrl)
-
-                        scriptDoc.select("a").forEach { a ->
-                            val link = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
-                            val img = a.selectFirst("img")
-
-                            val title = a.attr("title").trim()
-                                .ifBlank { img?.attr("alt")?.trim() ?: "" }
-                                .ifBlank { a.text().trim() }
-
-                            val rawImg =
-                                img?.attr("data-src")?.takeIf { it.isNotBlank() }
-                                    ?: img?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
-                                    ?: img?.attr("abs:src")?.takeIf { it.isNotBlank() }
-                                    ?: img?.attr("src")?.takeIf { it.isNotBlank() }
-                                    ?: ""
-
-                            if (isValidChannel(link, title)) {
-                                val finalUrl = fixUrl(link, mainUrl)
-                                val poster = if (rawImg.isNotBlank()) fixUrl(rawImg, mainUrl) else ""
-
-                                results.add(
-                                    newMovieSearchResponse(
-                                        cleanName(title),
-                                        finalUrl,
-                                        TvType.Live
-                                    ) {
-                                        this.posterUrl = poster
-                                    }
-                                )
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
+            val title = a.attr("title").trim()
+                .ifBlank { img?.attr("alt")?.trim() ?: "" }
+                .ifBlank { a.text().trim() }
+                .ifBlank {
+                    // fallback desde el href
+                    link.substringAfterLast("/")
+                        .replace("-ver.php", "")
+                        .replace("-", " ")
+                        .replaceFirstChar { it.uppercase() }
                 }
+
+            val rawImg =
+                img?.attr("data-src")?.takeIf { it.isNotBlank() }
+                    ?: img?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
+                    ?: img?.attr("abs:src")?.takeIf { it.isNotBlank() }
+                    ?: img?.attr("src")?.takeIf { it.isNotBlank() }
+                    ?: ""
+
+            if (isValidChannel(link, title)) {
+                val finalUrl = fixUrl(link, mainUrl)
+                val poster = if (rawImg.isNotBlank()) fixUrl(rawImg, mainUrl) else ""
+
+                results.add(
+                    newMovieSearchResponse(
+                        cleanName(title),
+                        finalUrl,
+                        TvType.Live
+                    ) {
+                        this.posterUrl = poster
+                    }
+                )
             }
         }
 
+        // Fallback por si cambian la estructura otra vez
         if (results.isEmpty()) {
-            doc.select("a:has(img), a").forEach { a ->
+            doc.select("a:has(img)").forEach { a ->
                 val link = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
                 val img = a.selectFirst("img")
-
                 val title = a.attr("title").trim()
                     .ifBlank { img?.attr("alt")?.trim() ?: "" }
                     .ifBlank { a.text().trim() }
 
-                val rawImg =
-                    img?.attr("data-src")?.takeIf { it.isNotBlank() }
-                        ?: img?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
-                        ?: img?.attr("abs:src")?.takeIf { it.isNotBlank() }
-                        ?: img?.attr("src")?.takeIf { it.isNotBlank() }
-                        ?: ""
-
                 if (isValidChannel(link, title)) {
-                    val finalUrl = fixUrl(link, mainUrl)
-                    val poster = if (rawImg.isNotBlank()) fixUrl(rawImg, mainUrl) else ""
-
                     results.add(
                         newMovieSearchResponse(
                             cleanName(title),
-                            finalUrl,
+                            fixUrl(link, mainUrl),
                             TvType.Live
                         ) {
-                            this.posterUrl = poster
+                            this.posterUrl = img?.attr("abs:src")?.takeIf { it.isNotBlank() }
+                                ?: img?.attr("src")
                         }
                     )
                 }
@@ -149,6 +129,7 @@ class CablevisionHdProvider : MainAPI() {
                 !l.contains("/tag/") &&
                 !l.contains("mailto:") &&
                 !l.contains("javascript:") &&
+                !l.contains("parrilla-directo") &&   // evitamos el propio listado
                 !t.contains("telegram") &&
                 !t.contains("soporte") &&
                 !t.contains("donar") &&
@@ -185,7 +166,7 @@ class CablevisionHdProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         return try {
             val doc = app.get(
-                mainUrl,
+                "$mainUrl/parrilla-directo.php",
                 referer = mainUrl,
                 headers = buildHeaders(mainUrl)
             ).document
