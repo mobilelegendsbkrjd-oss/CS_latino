@@ -3,8 +3,14 @@ package com.mundodonghua
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.getAndUnpack
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicInteger
 
 class MundoDonghua : MainAPI() {
     override var mainUrl = "https://www.mundodonghua.com"
@@ -202,6 +208,7 @@ class MundoDonghua : MainAPI() {
             addEpisodes(DubStatus.Subbed, finalEpisodes)
         }
     }
+
     private fun normalizeSeasonBaseSlug(slug: String): String {
         return slug
             .replace(Regex("""-\d+-sp$""", RegexOption.IGNORE_CASE), "")
@@ -227,6 +234,8 @@ class MundoDonghua : MainAPI() {
         return 1
     }
 
+    // ───────────────────────── loadLinks ─────────────────────────
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -234,190 +243,213 @@ class MundoDonghua : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episodeUrl = fixUrl(data.replace("ñ", "%C3%B1"))
-        var found = false
-
-        println("MD_DEBUG[LOADLINKS_START] data=$data")
-        println("MD_DEBUG[EPISODE_URL] $episodeUrl")
+        println("MD_DEBUG[LOADLINKS_START] $episodeUrl")
 
         val response = try {
             app.get(
                 episodeUrl,
-                timeout = 120,
+                timeout = 30,
                 headers = siteHeaders + mapOf(
                     "Referer" to episodeUrl,
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             println("MD_DEBUG[EPISODE_GET_ERROR] ${e.message}")
             return false
         }
 
         val html = response.text
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-
         val doc = response.document
 
-        println("MD_DEBUG[EPISODE_HTML_LEN] ${html.length}")
-        println("MD_DEBUG[SCRIPT_COUNT] ${doc.select("script").size}")
-
+        // ApplyView primero
         applyViewIfExists(html, episodeUrl)
 
-        val chunks = mutableListOf<String>()
-        chunks.add(html)
+        val candidates = linkedSetOf<String>()
+        val flat = html.replace("\\/", "/")
 
-        doc.select("script").forEachIndexed { index, script ->
-            val scriptText = script.data().ifBlank { script.html() }
+        // 1) iframes directos
+        Regex("""<iframe[^>]+src\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+            .findAll(flat)
+            .map { it.groupValues[1].trim() }
+            .map { if (it.startsWith("//")) "https:$it" else it }
+            .filter { it.startsWith("http", true) }
+            .forEach { candidates.add(it) }
 
-            println("MD_DEBUG[SCRIPT_" + index + "_LEN] " + scriptText.length)
-            println("MD_DEBUG[SCRIPT_" + index + "_HAS_EVAL] " + scriptText.contains("eval(function", true))
-            println("MD_DEBUG[SCRIPT_" + index + "_HAS_API] " + scriptText.contains("api_donghua", true))
-            println("MD_DEBUG[SCRIPT_" + index + "_HAS_BYSE] " + scriptText.contains("bysekoze", true))
-            println("MD_DEBUG[SCRIPT_" + index + "_HAS_VOE] " + scriptText.contains("voe", true))
-            println("MD_DEBUG[SCRIPT_" + index + "_HAS_VIDHIDE] " + scriptText.contains("vidhide", true))
-
-            if (scriptText.contains("eval(function", true)) {
-                val linePacked = scriptText
-                    .split("\n")
-                    .map { it.trim() }
-                    .filter { it.contains("eval(function", true) }
-
-                val regexPacked = Regex(
-                    """eval\(function\(p,a,c,k,e,.*?\)\)""",
-                    setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
-                ).findAll(scriptText)
-                    .map { it.value }
-                    .toList()
-
-                val packedList = (linePacked + regexPacked).distinct()
-
-                println("MD_DEBUG[SCRIPT_" + index + "_PACKED_COUNT] " + packedList.size)
-
-                packedList.forEachIndexed { pIndex, packed ->
-                    println("MD_DEBUG[PACKED_" + index + "_" + pIndex + "_LEN] " + packed.length)
-
-                    val customUnpack = try {
-                        JsUnpacker(packed).unpack()
-                    } catch (e: Exception) {
-                        println("MD_DEBUG[CUSTOM_UNPACK_ERROR_${index}_$pIndex] ${e.message}")
-                        null
-                    }
-
-                    println("MD_DEBUG[CUSTOM_UNPACK_${index}_$pIndex] len=${customUnpack?.length ?: 0}")
-
-                    val csUnpack = try {
-                        getAndUnpack(packed)
-                    } catch (e: Exception) {
-                        println("MD_DEBUG[CS_UNPACK_ERROR_${index}_$pIndex] ${e.message}")
-                        null
-                    }
-
-                    println("MD_DEBUG[CS_UNPACK_${index}_$pIndex] len=${csUnpack?.length ?: 0}")
-
-                    val unpack = customUnpack ?: csUnpack
-
-                    if (!unpack.isNullOrBlank()) {
-                        val clean = unpack.cleanText()
-                        println("MD_DEBUG[UNPACK_" + index + "_" + pIndex + "_PREVIEW] " + clean.take(700))
-                        chunks.add(clean)
-                    } else {
-                        println("MD_DEBUG[UNPACK_" + index + "_" + pIndex + "_EMPTY]")
+        // 2) IDs por host en el HTML crudo
+        val serverMap = listOf(
+            "bysekoze"   to "https://bysekoze.com/e/",
+            "voe.sx"     to "https://voe.sx/e/",
+            "vidhidepro" to "https://vidhidepro.com/v/",
+            "embedwish"  to "https://embedwish.com/e/"
+        )
+        val idRegex = Regex("""['"]([A-Za-z0-9]{10,16})['"]""")
+        for ((hostKey, prefix) in serverMap) {
+            var idx = flat.indexOf(hostKey, ignoreCase = true)
+            while (idx >= 0) {
+                val window = flat.substring(maxOf(0, idx - 500), minOf(flat.length, idx + 500))
+                idRegex.findAll(window).forEach { m ->
+                    val id = m.groupValues[1]
+                    if (id.length >= 10 && id.any { it.isDigit() } && id.any { it.isLetter() }) {
+                        candidates.add("$prefix$id")
                     }
                 }
-
-                val wholeCustom = try {
-                    JsUnpacker(scriptText).unpack()
-                } catch (e: Exception) {
-                    println("MD_DEBUG[WHOLE_CUSTOM_UNPACK_ERROR_$index] ${e.message}")
-                    null
-                }
-
-                if (!wholeCustom.isNullOrBlank()) {
-                    println("MD_DEBUG[WHOLE_CUSTOM_UNPACK_$index] len=${wholeCustom.length}")
-                    chunks.add(wholeCustom.cleanText())
-                }
+                idx = flat.indexOf(hostKey, idx + 1, ignoreCase = true)
             }
         }
 
-        val uniqueChunks = chunks
-            .map { it.cleanText() }
-            .distinct()
+        // 3) Desempaquetar TODOS los eval(...) y buscar iframes/IDs/slugs
+        val tamamoSlugs = mutableSetOf<String>()
 
-        println("MD_DEBUG[CHUNKS_TOTAL] ${uniqueChunks.size}")
+        doc.select("script").forEach { script ->
+            val txt = script.data().ifBlank { script.html() }
+            if (!txt.contains("eval(function(p,a,c,k,e", true)) return@forEach
 
-        uniqueChunks.forEachIndexed { chunkIndex, chunk ->
-            val urls = MundoHostResolver.extractUrls(chunk)
-            val slugs = extractSlugs(chunk)
+            // Cada eval(...) por separado
+            val parts = txt.split(Regex("""eval\s*\(""", RegexOption.IGNORE_CASE))
+            parts.drop(1).forEach { rest ->
+                val packed = "eval(" + rest
+                val unpacked = try { JsUnpacker(packed).unpack() }
+                catch (_: Exception) { null }
+                    ?: try { getAndUnpack(packed) } catch (_: Exception) { null }
 
-            println("MD_DEBUG[CHUNK_" + chunkIndex + "_LEN] " + chunk.length)
-            println("MD_DEBUG[CHUNK_" + chunkIndex + "_URL_COUNT] " + urls.size)
-            println("MD_DEBUG[CHUNK_" + chunkIndex + "_SLUG_COUNT] " + slugs.size)
+                if (unpacked.isNullOrBlank()) return@forEach
+                val clean = unpacked.replace("\\/", "/").replace("&amp;", "&")
+                println("MD_DEBUG[UNPACKED] ${clean.take(400)}")
 
-            urls.forEach { println("MD_DEBUG[CHUNK_" + chunkIndex + "_URL] " + it) }
-            slugs.forEach { println("MD_DEBUG[CHUNK_" + chunkIndex + "_SLUG] " + it) }
+                // iframes del JS desempaquetado
+                Regex("""<iframe[^>]+src\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+                    .findAll(clean)
+                    .map { it.groupValues[1].trim() }
+                    .map { if (it.startsWith("//")) "https:$it" else it }
+                    .filter { it.startsWith("http", true) }
+                    .forEach { candidates.add(it) }
 
-            Regex("""<iframe[^>]+src=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
-                .findAll(chunk)
-                .map { it.groupValues[1].replace("\\/", "/").replace("&amp;", "&") }
-                .distinct()
-                .forEach { iframe ->
-                    println("MD_DEBUG[IFRAME_FOUND] $iframe")
-                    val ok = MundoHostResolver.resolve(
-                        iframe,
-                        episodeUrl,
-                        subtitleCallback,
-                        callback
-                    )
-                    println("MD_DEBUG[IFRAME_RESULT] ok=$ok iframe=$iframe")
-                    found = ok || found
+                // URLs de video absolutas
+                Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
+                    .findAll(clean)
+                    .map { it.value.replace("&amp;", "&").trimEnd('"', '\'', ')', ',', ';') }
+                    .filter { MundoHostResolver.isVideoHost(it) }
+                    .forEach { candidates.add(it) }
+
+                // IDs por host dentro del unpacked
+                for ((hostKey, prefix) in serverMap) {
+                    if (!clean.contains(hostKey, ignoreCase = true)) continue
+                    idRegex.findAll(clean).forEach { m ->
+                        val id = m.groupValues[1]
+                        if (id.length >= 10 && id.any { it.isDigit() } && id.any { it.isLetter() }) {
+                            candidates.add("$prefix$id")
+                        }
+                    }
                 }
 
-            urls.forEach { raw ->
-                val cleanUrl = raw.replace("\\/", "/").replace("&amp;", "&")
-                val isVideo = MundoHostResolver.isVideoHost(cleanUrl)
-
-                println("MD_DEBUG[TRY_URL] isVideo=$isVideo url=$cleanUrl")
-
-                if (isVideo) {
-                    val ok = MundoHostResolver.resolve(
-                        cleanUrl,
-                        episodeUrl,
-                        subtitleCallback,
-                        callback
-                    )
-                    println("MD_DEBUG[TRY_URL_RESULT] ok=$ok url=$cleanUrl")
-                    found = ok || found
-                }
-            }
-
-            slugs.forEach { slug ->
-                println("MD_DEBUG[TRY_TAMAMO] $slug")
-                val ok = MundoHostResolver.resolveTamamo(
-                    slug,
-                    episodeUrl,
-                    subtitleCallback,
-                    callback
-                )
-                println("MD_DEBUG[TRY_TAMAMO_RESULT] ok=$ok slug=$slug")
-                found = ok || found
+                // Slug de Tamamo: string base64 largo (> 100 chars) que es el data-slug
+                Regex("""["']([A-Za-z0-9+/=]{100,})["']""")
+                    .findAll(clean)
+                    .forEach { tamamoSlugs.add(it.groupValues[1]) }
             }
         }
 
-        println("MD_DEBUG[LOADLINKS_END] found=$found")
+        // 4) Slug de Tamamo desde el HTML crudo (por si no se desempacó)
+        Regex("""["']([A-Za-z0-9+/=]{200,})["']""")
+            .findAll(flat)
+            .forEach { tamamoSlugs.add(it.groupValues[1]) }
+
+        // 5) Slugs de la API vieja
+        extractSlugs(html).forEach { tamamoSlugs.add(it) }
+
+        println("MD_DEBUG[CANDIDATES] ${candidates.joinToString(" | ")}")
+        println("MD_DEBUG[TAMAMO_SLUGS] ${tamamoSlugs.map { it.take(40) + "..." }.joinToString(" | ")}")
+
+        if (candidates.isEmpty() && tamamoSlugs.isEmpty()) {
+            println("MD_DEBUG[NO_CANDIDATES]")
+            return false
+        }
+
+        // Resolver todo en paralelo
+        val produced = AtomicInteger(0)
+        val counting: (ExtractorLink) -> Unit = { link ->
+            produced.incrementAndGet()
+            callback(link)
+        }
+
+        coroutineScope {
+            val jobs = mutableListOf<kotlinx.coroutines.Deferred<Boolean>>()
+
+            candidates.forEach { url ->
+                jobs.add(async {
+                    withTimeoutOrNull(15_000L) {
+                        val local = localExtractor(url)
+                        if (local != null) {
+                            try { local.getUrl(url, episodeUrl, subtitleCallback, counting) }
+                            catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { println("MD_DEBUG[LOCAL_ERR] ${local.name} $url -> ${e.message}") }
+                        }
+                        if (produced.get() > 0) return@withTimeoutOrNull true
+
+                        try { loadExtractor(url, episodeUrl, subtitleCallback, counting) }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { println("MD_DEBUG[LOADEXTRACTOR_ERR] $url -> ${e.message}") }
+                        if (produced.get() > 0) return@withTimeoutOrNull true
+
+                        try { MundoHostResolver.resolve(url, episodeUrl, subtitleCallback, counting) }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { println("MD_DEBUG[LEGACY_ERR] $url -> ${e.message}") }
+                        produced.get() > 0
+                    } ?: false
+                })
+            }
+
+            tamamoSlugs.forEach { slug ->
+                jobs.add(async {
+                    withTimeoutOrNull(20_000L) {
+                        try {
+                            MundoHostResolver.resolveTamamo(slug, episodeUrl, subtitleCallback, counting)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            println("MD_DEBUG[TAMAMO_ERR] $slug -> ${e.message}")
+                        }
+                        produced.get() > 0
+                    } ?: false
+                })
+            }
+
+            jobs.awaitAll()
+        }
+
+        val found = produced.get() > 0
+        println("MD_DEBUG[LOADLINKS_END] found=$found links=${produced.get()}")
         return found
+    }
+
+    private fun localExtractor(url: String): ExtractorApi? {
+        val host = Regex("""^https?://([^/?#]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)?.lowercase()?.removePrefix("www.") ?: return null
+
+        val vidhideHosts = listOf(
+            "vidhide", "filelions", "dhcplay", "kinoger", "smoothpre", "riderjet",
+            "dhtpre", "peytonepre", "movearnpre", "dintezuvio", "mycloudz"
+        )
+        val wishHosts = listOf("wish", "swiftplayers", "embedwish", "hlswish", "flaswish")
+
+        return when {
+            host.contains("byse") || host.contains("filemoon") || host == "gn1r5n.org" -> MdByse()
+            host.startsWith("voe.") -> MdVoe()
+            vidhideHosts.any { host.contains(it) } -> MdVidHidePro()
+            wishHosts.any { host.contains(it) } -> MdStreamWish()
+            else -> null
+        }
     }
 
     private suspend fun applyViewIfExists(html: String, episodeUrl: String) {
         try {
             val idMedia = Regex("""ApplyView\((\d+)\)""", RegexOption.IGNORE_CASE)
-                .find(html)
-                ?.groupValues
-                ?.getOrNull(1)
+                .find(html)?.groupValues?.getOrNull(1)
                 ?: Regex("""id_media\s*[:=]\s*["']?(\d+)["']?""", RegexOption.IGNORE_CASE)
-                    .find(html)
-                    ?.groupValues
-                    ?.getOrNull(1)
+                    .find(html)?.groupValues?.getOrNull(1)
                 ?: return
 
             app.post(
@@ -436,13 +468,6 @@ class MundoDonghua : MainAPI() {
             )
         } catch (_: Exception) {
         }
-    }
-
-    private fun String.cleanText(): String {
-        return replace("diasfem", "embedsito")
-            .replace("\\/", "/")
-            .replace("\\\"", "\"")
-            .replace("&amp;", "&")
     }
 
     private fun extractSlugs(text: String): List<String> {

@@ -52,7 +52,6 @@ class MonosChinos : MainAPI() {
         "$mainUrl/directorio?tipo=pelicula&orden=desc&pag=" to "Películas",
         "$mainUrl/directorio?tipo=ova&orden=desc&pag=" to "OVAs",
         "$mainUrl/directorio?tipo=especial&orden=desc&pag=" to "Especiales",
-        // Categorías filtradas por latino
         "$mainUrl/directorio?buscar=latino&tipo=tv&orden=desc&pag=" to "Anime Latino",
         "$mainUrl/directorio?buscar=latino&tipo=pelicula&orden=desc&pag=" to "Películas Latino"
     )
@@ -66,32 +65,26 @@ class MonosChinos : MainAPI() {
         val doc = app.get(url, headers = requestHeaders).document
         val homeList = mutableListOf<HomePageList>()
 
-        // Para las categorías normales y latinas: usamos el mismo selector de lista
         val items = doc.select("div#listanime ul li a[href*='/anime/'], div#listanime ul li a[href*='/ver/']")
-            .mapNotNull { el ->
-                el.toSearchResult()
-            }
+            .mapNotNull { el -> el.toSearchResult() }
             .distinctBy { it.url }
 
         if (items.isNotEmpty()) {
             homeList.add(HomePageList(request.name, items))
         }
 
-        return HomePageResponse(homeList)
+        // ✅ CORREGIDO: newHomePageResponse en lugar del constructor obsoleto
+        return newHomePageResponse(homeList)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
         val href = attr("href").trim()
         val title = when {
-            href.contains("/ver/") -> {
-                selectFirst("h2")?.text()?.trim() ?: return null
-            }
-            else -> {
-                selectFirst("h3")?.text()?.trim() ?: return null
-            }
+            href.contains("/ver/") -> selectFirst("h2")?.text()?.trim() ?: return null
+            else -> selectFirst("h3")?.text()?.trim() ?: return null
         }
 
-        val poster = selectFirst("img")?.let { extractPoster(it) }
+        val poster = extractPoster(selectFirst("img"))
         val episodeNum = selectFirst(".episode")?.text()?.trim()
         return newTvSeriesSearchResponse(
             if (!episodeNum.isNullOrBlank()) "$title - Episodio $episodeNum" else title,
@@ -127,7 +120,7 @@ class MonosChinos : MainAPI() {
         val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: doc.selectFirst("img.lazy[data-src]")?.attr("data-src")
             ?: doc.selectFirst("img[src*='/cdn/img/anime/']")?.attr("src")
-            ?: doc.selectFirst("img.aspecto, img[src*='/portada/']")?.let { extractPoster(it) }
+            ?: extractPoster(doc.selectFirst("img.aspecto, img[src*='/portada/']"))
         val plot: String = doc.selectFirst("meta[property='og:description']")?.attr("content")
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: doc.selectFirst("p")?.text()
@@ -189,63 +182,75 @@ class MonosChinos : MainAPI() {
     ): Boolean {
         var found = false
 
+        // 1. Obtener la página del episodio
         val doc = app.get(data, headers = requestHeaders, timeout = 45).document
 
-        // Obtener data-encrypt del ul.nav-tabs
-        val encrypt = doc.selectFirst("ul.nav-tabs.opt")?.attr("data-encrypt") ?: return false
-
-        // POST a ajax_pagination para obtener los servers
-        val formBody = FormBody.Builder()
-            .add("acc", "opt")
-            .add("i", encrypt)
-            .build()
-
-        val ajaxResponse = app.post(
-            "$mainUrl/ajax_pagination",
-            headers = requestHeaders,
-            requestBody = formBody,
-            timeout = 45
-        )
-
-        val serverDoc = ajaxResponse.document
-
-        // Extraer botones con data-player desde la respuesta AJAX
-        serverDoc.select("button.play-video[data-player]").forEach { btn ->
-            val base64 = btn.attr("data-player").trim()
-            if (base64.isNotBlank()) {
+        // 2. EXTRAER PRIMERO LOS ENLACES DE DESCARGA (a.btn-warning) — método más fiable
+        doc.select("a.btn-warning[target='_blank'][href]").forEach { a ->
+            val downloadUrl = a.attr("abs:href").trim()
+            if (downloadUrl.isNotBlank()) {
+                println("MonosChinos: probando enlace de descarga -> $downloadUrl")
                 try {
-                    val decoded = String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8).trim()
-                    if (decoded.startsWith("http")) {
-                        loadExtractor(decoded, data, subtitleCallback, callback)
-                        found = true
-                    }
-                } catch (_: Throwable) {}
+                    loadExtractor(downloadUrl, data, subtitleCallback, callback)
+                    found = true
+                } catch (e: Exception) {
+                    println("MonosChinos: error con $downloadUrl -> ${e.message}")
+                }
             }
         }
 
-        // Fallback: iframes en el doc original
+        // 3. Intentar la vía AJAX con data-encrypt (si existe)
+        val encrypt = doc.selectFirst("ul.nav-tabs.opt")?.attr("data-encrypt")
+        if (!encrypt.isNullOrBlank()) {
+            val formBody = FormBody.Builder()
+                .add("acc", "opt")
+                .add("i", encrypt)
+                .build()
+
+            try {
+                val ajaxResponse = app.post(
+                    "$mainUrl/ajax_pagination",
+                    headers = requestHeaders,
+                    requestBody = formBody,
+                    timeout = 45
+                )
+                val serverDoc = ajaxResponse.document
+
+                // Extraer botones con data-player desde la respuesta AJAX
+                serverDoc.select("button.play-video[data-player]").forEach { btn ->
+                    val base64 = btn.attr("data-player").trim()
+                    if (base64.isNotBlank()) {
+                        try {
+                            val decoded = String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8).trim()
+                            println("MonosChinos: data-player decodificado -> $decoded")
+                            if (decoded.startsWith("http://") || decoded.startsWith("https://")) {
+                                loadExtractor(decoded, data, subtitleCallback, callback)
+                                found = true
+                            }
+                        } catch (e: Throwable) {
+                            println("MonosChinos: error decodificando data-player -> ${e.message}")
+                        }
+                    }
+                }
+
+                // Fallback: iframes en serverDoc
+                serverDoc.select("div.ifplay iframe[src], iframe[src]").forEach { iframe ->
+                    val src = iframe.attr("abs:src").trim()
+                    if (src.isNotBlank()) {
+                        loadExtractor(src, data, subtitleCallback, callback)
+                        found = true
+                    }
+                }
+            } catch (e: Exception) {
+                println("MonosChinos: error en ajax_pagination -> ${e.message}")
+            }
+        }
+
+        // 4. Fallback: iframes en el doc original
         doc.select("div.ifplay iframe[src], iframe[src]").forEach { iframe ->
             val src = iframe.attr("abs:src").trim()
             if (src.isNotBlank()) {
                 loadExtractor(src, data, subtitleCallback, callback)
-                found = true
-            }
-        }
-
-        // Fallback: iframes en serverDoc (si se inyectaron)
-        serverDoc.select("div.ifplay iframe[src], iframe[src]").forEach { iframe ->
-            val src = iframe.attr("abs:src").trim()
-            if (src.isNotBlank()) {
-                loadExtractor(src, data, subtitleCallback, callback)
-                found = true
-            }
-        }
-
-        // Fallback: enlaces de descargas
-        doc.select("a.btn-warning[target='_blank'][href]").forEach { a ->
-            val downloadUrl = a.attr("abs:href").trim()
-            if (downloadUrl.isNotBlank()) {
-                loadExtractor(downloadUrl, data, subtitleCallback, callback)
                 found = true
             }
         }

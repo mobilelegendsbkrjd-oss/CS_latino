@@ -17,56 +17,56 @@ class JsUnpacker(packedJS: String?) {
         val js = packedJS ?: return null
 
         try {
+            // Acepta tanto '\(' como '}(' (las dos formas que usan)
             var p = Pattern.compile(
-                """\}\s*\('(.*)',\s*(.*?),\s*(\d+),\s*'(.*?)'\.split\('\|'\)""",
+                """[})]\s*\(\s*['"](.*)['"]\s*,\s*(.*?)\s*,\s*(\d+)\s*,\s*['"](.*?)['"]\s*\.split\(\s*['"]\|['"]\s*\)""",
                 Pattern.DOTALL
             )
-
             var m = p.matcher(js)
 
-            if (m.find() && m.groupCount() == 4) {
-                val payload = m.group(1).replace("\\'", "'")
-                val radixStr = m.group(2)
-                val countStr = m.group(3)
-                val symtab = m.group(4).split("\\|".toRegex()).toTypedArray()
+            if (!m.find() || m.groupCount() < 4) return null
 
-                var radix = 36
-                var count = 0
+            val payload = m.group(1).replace("\\'", "'")
+            val radixStr = m.group(2)
+            val countStr = m.group(3)
+            val symtab = m.group(4).split("|").toTypedArray()
 
-                try { radix = radixStr.toInt() } catch (_: Exception) {}
-                try { count = countStr.toInt() } catch (_: Exception) {}
+            var radix = 36
+            var count = 0
+            try { radix = radixStr.trim().toInt() } catch (_: Exception) {}
+            try { count = countStr.trim().toInt() } catch (_: Exception) {}
 
-                if (symtab.size != count) throw Exception("Unknown p.a.c.k.e.r. encoding")
+            // Si symtab tiene menos elementos que count, probablemente split falló
+            if (symtab.isEmpty()) return null
 
-                val unbase = Unbase(radix)
-                p = Pattern.compile("\\b\\w+\\b")
-                m = p.matcher(payload)
+            val unbase = Unbase(radix)
+            p = Pattern.compile("\\b\\w+\\b")
+            m = p.matcher(payload)
 
-                val decoded = StringBuilder(payload)
-                var replaceOffset = 0
+            val decoded = StringBuilder(payload)
+            var replaceOffset = 0
 
-                while (m.find()) {
-                    val word = m.group(0)
-                    val x = try {
-                        unbase.unbase(word)
-                    } catch (_: Exception) {
-                        continue
-                    }
-
-                    val value = if (x in symtab.indices) symtab[x] else null
-
-                    if (!value.isNullOrEmpty()) {
-                        decoded.replace(
-                            m.start() + replaceOffset,
-                            m.end() + replaceOffset,
-                            value
-                        )
-                        replaceOffset += value.length - word.length
-                    }
+            while (m.find()) {
+                val word = m.group(0)
+                val x = try {
+                    unbase.unbase(word)
+                } catch (_: Exception) {
+                    continue
                 }
 
-                return decoded.toString()
+                val value = if (x in symtab.indices) symtab[x] else null
+
+                if (!value.isNullOrEmpty()) {
+                    decoded.replace(
+                        m.start() + replaceOffset,
+                        m.end() + replaceOffset,
+                        value
+                    )
+                    replaceOffset += value.length - word.length
+                }
             }
+
+            return decoded.toString()
         } catch (e: Exception) {
             println("MD_DEBUG[JSUNPACKER_ERROR] ${e.message}")
         }

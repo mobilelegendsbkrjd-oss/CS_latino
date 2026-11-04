@@ -7,6 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class Monoschinos3Plugin: Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(Monoschinos3())
+        registerMainAPI(MonosChinos3())
     }
 }

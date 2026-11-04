@@ -132,99 +132,122 @@ object MundoHostResolver {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanSlug = slug.trim().trim('"', '\'')
-        println("MD_DEBUG[TAMAMO_START] slug=$cleanSlug referer=$referer")
-
         if (cleanSlug.isBlank()) return false
 
-        val api = "$MAIN_URL/api_donghua.php?slug=$cleanSlug"
+        println("MD_DEBUG[TAMAMO_START] slug=${cleanSlug.take(40)}... referer=$referer")
+
         val headers = mapOf(
             "User-Agent" to USER_AGENT,
-            "Accept" to "*/*",
+            "Accept" to "application/json,text/plain,*/*",
             "Accept-Language" to "es-419,es;q=0.9",
             "Origin" to MAIN_URL,
             "Referer" to referer,
             "X-Requested-With" to "XMLHttpRequest"
         )
 
+        val api = "$MAIN_URL/api_donghua.php?slug=$cleanSlug"
         val jsonText = try {
-            app.get(api, referer = referer, headers = headers).text
+            app.get(api, referer = referer, headers = headers, timeout = 20).text
         } catch (e: Exception) {
-            println("MD_DEBUG[TAMAMO_GET_ERROR] ${e.message}")
-            try {
-                app.post(api, referer = referer, headers = headers).text
-            } catch (e2: Exception) {
-                println("MD_DEBUG[TAMAMO_POST_ERROR] ${e2.message}")
-                return false
-            }
+            println("MD_DEBUG[TAMAMO_GET_ERR] ${e.message}")
+            return false
         }
 
         println("MD_DEBUG[TAMAMO_API] $api")
-        println("MD_DEBUG[TAMAMO_RESPONSE] ${jsonText.take(1500)}")
+        println("MD_DEBUG[TAMAMO_RESPONSE] ${jsonText.take(800)}")
+
+        // La respuesta puede ser un array [{url: "..."}, ...] o un objeto {url: "..."}
+        val keys = mutableListOf<String>()
+        try {
+            val trimmed = jsonText.trim()
+            if (trimmed.startsWith("[")) {
+                val arr = org.json.JSONArray(trimmed)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val u = obj.optString("url").ifBlank { obj.optString("key") }
+                    if (u.isNotBlank()) keys.add(u)
+                }
+            } else if (trimmed.startsWith("{")) {
+                val obj = org.json.JSONObject(trimmed)
+                val u = obj.optString("url").ifBlank { obj.optString("key") }
+                if (u.isNotBlank()) keys.add(u)
+            }
+        } catch (e: Exception) {
+            println("MD_DEBUG[TAMAMO_PARSE_ERR] ${e.message}")
+        }
+
+        println("MD_DEBUG[TAMAMO_KEYS] $keys")
+
+        if (keys.isEmpty()) return false
 
         var found = false
 
-        try {
-            val arr = JSONArray(jsonText)
+        for (key in keys) {
+            // 1) El key es el ID de Dailymotion encriptado -> base64 decode
+            val decoded = try {
+                String(android.util.Base64.decode(key, android.util.Base64.DEFAULT), Charsets.UTF_8)
+            } catch (_: Exception) { null }
 
-            for (i in 0 until arr.length()) {
-                val obj = arr.optJSONObject(i) ?: continue
-                println("MD_DEBUG[TAMAMO_OBJ_$i] $obj")
+            println("MD_DEBUG[TAMAMO_DECODED] $decoded")
 
-                val sources = obj.optJSONArray("source")
-                if (sources != null) {
-                    println("MD_DEBUG[TAMAMO_SOURCES_COUNT] ${sources.length()}")
-                    for (s in 0 until sources.length()) {
-                        val src = sources.optJSONObject(s) ?: continue
-                        var file = src.optString("file")
-                        val label = src.optString("label").ifBlank { "Protea" }
-                        if (file.startsWith("//")) file = "https:$file"
+            // Intenta dmplayer primero
+            for (base in listOf("https://www.mdnemonicplayer.xyz", "https://www.mdplayer.xyz")) {
+                val playerUrl = "$base/nemonicplayer/dmplayer.php?key=$key"
+                try {
+                    val html = app.get(
+                        playerUrl,
+                        referer = MAIN_URL,
+                        headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to "$MAIN_URL/"
+                        ),
+                        timeout = 15
+                    ).text.replace("\\/", "/").replace("\\\"", "\"")
 
-                        println("MD_DEBUG[TAMAMO_SOURCE] label=$label file=$file")
+                    println("MD_DEBUG[TAMAMO_PLAYER_LEN] ${html.length}")
 
-                        if (file.isNotBlank()) {
-                            emitDirect(file, referer, callback, "Protea $label")
+                    // Busca el video-id de Dailymotion
+                    val dmId = Regex("""(?:dailymotion\.com/(?:embed/)?video/|video-id=["'])([A-Za-z0-9]+)""")
+                        .find(html)?.groupValues?.getOrNull(1)
+
+                    println("MD_DEBUG[TAMAMO_DM_ID] $dmId")
+
+                    if (dmId != null) {
+                        val dmUrl = "https://www.dailymotion.com/video/$dmId"
+                        if (resolve(dmUrl, playerUrl, subtitleCallback, callback)) {
                             found = true
+                            break
                         }
                     }
-                }
 
-                var file = obj.optString("file")
-                if (file.startsWith("//")) file = "https:$file"
+                    // Busca m3u8/mp4 directos
+                    val streams = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+                        .findAll(html)
+                        .map { it.value }
+                        .distinct()
+                        .toList()
 
-                if (file.isNotBlank()) {
-                    println("MD_DEBUG[TAMAMO_FILE] $file")
-                    found = resolve(file, referer, subtitleCallback, callback) || found
-                }
-
-                val key = obj.optString("url").ifBlank { obj.optString("key") }
-
-                if (key.isNotBlank()) {
-                    println("MD_DEBUG[TAMAMO_KEY] $key")
-
-                    val players = listOf(
-                        "https://www.mdnemonicplayer.xyz/nemonicplayer/dmplayer.php?key=$key",
-                        "https://www.mdplayer.xyz/nemonicplayer/dmplayer.php?key=$key"
-                    )
-
-                    for (player in players) {
-                        println("MD_DEBUG[TAMAMO_PLAYER] $player")
-                        found = resolveDmPlayer(player, referer, callback) || found
+                    for (s in streams) {
+                        emitDirect(s, playerUrl, callback, "Tamamo")
+                        found = true
                     }
 
-                    val decoded = runCatching {
-                        String(Base64.getDecoder().decode(key), Charsets.UTF_8)
-                    }.getOrNull()
-
-                    println("MD_DEBUG[TAMAMO_KEY_DECODED] $decoded")
-
-                    if (!decoded.isNullOrBlank()) {
-                        val dm = if (decoded.startsWith("http", true)) decoded else "https://www.dailymotion.com/embed/video/$decoded"
-                        found = resolve(dm, referer, subtitleCallback, callback) || found
-                    }
+                    if (found) break
+                } catch (e: Exception) {
+                    println("MD_DEBUG[TAMAMO_PLAYER_ERR] $playerUrl -> ${e.message}")
                 }
             }
-        } catch (e: Exception) {
-            println("MD_DEBUG[TAMAMO_PARSE_ERROR] ${e.message}")
+
+            // 2) El decoded es una URL directa o ID de Dailymotion
+            if (!found && !decoded.isNullOrBlank()) {
+                val dmUrl = if (decoded.startsWith("http", true)) decoded
+                else "https://www.dailymotion.com/embed/video/$decoded"
+                if (resolve(dmUrl, referer, subtitleCallback, callback)) {
+                    found = true
+                }
+            }
+
+            if (found) break
         }
 
         println("MD_DEBUG[TAMAMO_END] found=$found")
