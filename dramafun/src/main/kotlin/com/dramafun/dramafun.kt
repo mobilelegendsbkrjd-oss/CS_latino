@@ -8,7 +8,7 @@ import org.json.JSONObject
 
 class DramaFun : MainAPI() {
 
-    override var mainUrl = "https://ww6.dramafuntv.com"
+    override var mainUrl = "https://dah.dramafuntv.com"
     override var name = "DramaFun"
     override val hasMainPage = true
     override var lang = "es"
@@ -126,35 +126,33 @@ class DramaFun : MainAPI() {
     // ================= LOAD =================
 
     override suspend fun load(url: String): LoadResponse {
-
         val doc = app.get(url).document
 
-        val title =
-            doc.selectFirst("h1")?.text()
-                ?: doc.selectFirst("h2")?.text()
-                ?: "Drama"
+        // El título del EPISODIO está en h1[itemprop=name]
+        val episodeTitle = doc.selectFirst("h1[itemprop=name]")?.text() ?: "Drama"
 
-        val cleanTitle = title.replace(Regex("(?i)Capitulo.*|online sub español HD|en Español"), "").trim()
+        // El título de la SERIE está en .pm-series-meta h1.title
+        val seriesTitle = doc.selectFirst(".pm-series-meta h1.title")?.text()
+            ?: episodeTitle.replace(Regex("(?i)Capitulo.*|Capítulo.*"), "").trim()
 
-        val poster =
-            doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: doc.selectFirst(".pm-video-thumb img, .pm-series-brief img")?.attr("abs:src")
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst(".pm-series-brief img")?.attr("abs:src")
 
-        val plot = doc.selectFirst(".pm-series-description p, .pm-video-description p")?.text()?.trim()
+        val plot = doc.selectFirst(".pm-series-description .description p")?.text()?.trim()
+            ?: doc.selectFirst(".pm-video-description p")?.text()?.trim()
 
+        // Episodios: buscar en el ul con clase 's' (escritorio) o en el select (móvil)
         val episodesDesktop = doc.select("ul.s a[href*=watch.php?vid=]")
         val episodesMobile = doc.select("select.episodeoption option[value*=watch.php?vid=]")
-
         val episodeElements = if (episodesDesktop.isNotEmpty()) episodesDesktop else episodesMobile
 
         if (episodeElements.isNotEmpty()) {
-
             val epList = episodeElements.mapIndexed { index, el ->
-
-                val epUrlRaw = el.attr("href") ?: el.attr("value") ?: ""
+                val epUrlRaw = el.attr("href").ifBlank { el.attr("value") }
                 val epUrl = if (epUrlRaw.startsWith("http")) epUrlRaw else "$mainUrl/$epUrlRaw"
 
-                val epText = el.text().trim() ?: el.attr("title") ?: ""
+                // Intentar extraer el número de episodio del título o del texto
+                val epText = el.text().trim().ifBlank { el.attr("title") }
                 val epNum = Regex("(?i)capitulo\\s*(\\d+)").find(epText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: (index + 1)
 
@@ -166,7 +164,7 @@ class DramaFun : MainAPI() {
             }
 
             return newTvSeriesLoadResponse(
-                cleanTitle,
+                seriesTitle, // Usar el título de la serie, no del episodio
                 url,
                 TvType.TvSeries,
                 epList
@@ -176,8 +174,9 @@ class DramaFun : MainAPI() {
             }
         }
 
+        // Si no hay episodios, es una película
         return newMovieLoadResponse(
-            cleanTitle,
+            seriesTitle,
             url,
             TvType.Movie,
             url
@@ -195,38 +194,42 @@ class DramaFun : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        try {
+            val doc = app.get(data, timeout = 20).document
 
-        val doc = app.get(data).document
+            // === 1. Buscar embeds directamente en watch.php (Tipo B) ===
+            var embedUrls = doc.select("ul.WatchList li[data-embed-url]").mapNotNull {
+                it.attr("data-embed-url").takeIf { url -> url.isNotBlank() }
+            }.toMutableList()
 
-        val enfun = doc.selectFirst("a.xtgo")?.attr("href")
-            ?: return false
+            // === 2. Si no hay, ir a play.php (Tipo A) ===
+            if (embedUrls.isEmpty()) {
+                val playUrlRaw = doc.selectFirst("a.xtgo[href*=play.php]")?.attr("href")
+                    ?: doc.selectFirst("a#play-video[href*=play.php]")?.attr("href")
+                    ?: doc.selectFirst("a[href*=play.php]")?.attr("href")
 
-        val post = enfun.substringAfter("post=")
+                if (!playUrlRaw.isNullOrBlank()) {
+                    val playUrl = if (playUrlRaw.startsWith("http")) playUrlRaw else "$mainUrl/$playUrlRaw"
+                    val playDoc = app.get(playUrl, timeout = 20).document
 
-        val decoded =
-            String(Base64.decode(post, Base64.DEFAULT))
+                    embedUrls = playDoc.select("ul.WatchList li[data-embed-url]").mapNotNull {
+                        it.attr("data-embed-url").takeIf { url -> url.isNotBlank() }
+                    }.toMutableList()
+                }
+            }
 
-        val json = JSONObject(decoded)
+            if (embedUrls.isEmpty()) return false
 
-        val servers = json.getJSONObject("servers")
+            // === 3. Cargar extractors ===
+            embedUrls.forEach { embedUrl ->
+                loadExtractor(embedUrl, data, subtitleCallback, callback)
+            }
 
-        val keys = servers.keys()
-
-        while (keys.hasNext()) {
-
-            val key = keys.next()
-
-            val server = servers.getString(key)
-
-            loadExtractor(
-                server,
-                data,
-                subtitleCallback,
-                callback
-            )
+            return true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return false
         }
-
-        return true
     }
 
     // ================= PARSER =================

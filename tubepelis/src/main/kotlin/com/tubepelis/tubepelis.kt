@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 
-class TubePelis  : MainAPI() {
+class TubePelis : MainAPI() {
 
     override var mainUrl = "https://www.tubepelis.com"
 
@@ -21,11 +21,9 @@ class TubePelis  : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-
         "$mainUrl/" to "🆕 Recientes",
         "$mainUrl/pelicula/ultimas-peliculas/" to "📅 Últimas",
         "$mainUrl/pelicula/peliculas-mas-vistas/" to "🔥 Más vistas",
-
         "$mainUrl/categoria/accion/" to "💥 Acción",
         "$mainUrl/categoria/animacion-e-infantil/" to "🧸 Animación",
         "$mainUrl/categoria/artes-marciales/" to "🥋 Artes Marciales",
@@ -51,49 +49,69 @@ class TubePelis  : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url =
-            if (page == 1) {
-                request.data
-            } else {
-                "${request.data}?page=$page"
-            }
-
+        val url = if (page == 1) request.data else "${request.data}?page=$page"
         val document = app.get(url).document
 
         val home = document
-            .select("li.peli_bx")
+            .select("div.group.relative.flex.flex-col")
             .mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
 
-        return newHomePageResponse(
-            request.name,
-            home
-        )
+        return newHomePageResponse(request.name, home)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/buscar/?q=$query"
-
         val document = app.get(url).document
 
         return document
-            .select("li.peli_bx")
+            .select("div.group.relative.flex.flex-col")
             .mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title =
-            document.selectFirst("meta[property=og:title]")?.attr("content")
-                ?: document.selectFirst("h1")?.text()
-                ?: "Sin título"
+        // 1. Extraer y LIMPIAR el título
+        var title = document.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: document.selectFirst("h1")?.text()
+            ?: "Sin título"
 
-        val poster =
-            document.selectFirst("meta[property=og:image]")?.attr("content")
+        // Limpiamos el título para quitar "Ver ", el año "(2008)" y "| TubePelis"
+        title = title
+            .replace(Regex("^Ver\\s+", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\(\\d{4}\\)"), "") // Quita el año (2008)
+            .replace(Regex("\\s*Película Completa.*$", RegexOption.IGNORE_CASE), "") // Quita lo que sigue a "Película"
+            .replace(Regex("\\s*\\|.*$"), "") // Quita "| TubePelis"
+            .trim()
 
-        val plot =
-            document.selectFirst("meta[property=og:description]")?.attr("content")
-                ?: ""
+        // 2. Extraer el Póster (priorizando el og:image de alta calidad)
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: document.selectFirst("img[src*='/files/uploads/']")?.attr("abs:src")
+
+        // 3. Extraer la Sinopsis o Trama
+        // Buscamos el JSON-LD de tipo Movie (que tiene la descripción completa) o el meta description
+        var plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+
+        val jsonLdScripts = document.select("script[type=application/ld+json]")
+        for (script in jsonLdScripts) {
+            val jsonText = script.data()
+            if (jsonText.contains("\"@type\":\"Movie\"") || jsonText.contains("\"@type\": \"Movie\"")) {
+                // Expresión regular rápida para sacar el "description" del JSON
+                val match = Regex("\"description\"\\s*:\\s*\"([^\"]+)\"").find(jsonText)
+                if (match != null) {
+                    plot = match.groupValues[1].replace("\\n", "\n").replace("\\\"", "\"")
+                    break
+                }
+            }
+        }
+
+        // 4. Extraer el Año y la Duración (opcional, pero le da mejor vista a la app)
+        val year = document.selectFirst("meta[property=video:release_date]")?.attr("content")?.take(4)?.toIntOrNull()
+
+        val durationStr = document.selectFirst("meta[property=video:duration]")?.attr("content")
+        val duration = durationStr?.toLongOrNull()?.div(60) // Convertir segundos a minutos
 
         return newMovieLoadResponse(
             title,
@@ -103,6 +121,8 @@ class TubePelis  : MainAPI() {
         ) {
             this.posterUrl = poster
             this.plot = plot
+            this.year = year
+            this.duration = duration?.toInt()
         }
     }
 
@@ -127,16 +147,12 @@ class TubePelis  : MainAPI() {
                 .ifBlank { it.attr("src") }
                 .trim()
 
-            if (
-                src.isNotBlank() &&
-                src != "about:blank"
-            ) {
+            if (src.isNotBlank() && src != "about:blank") {
                 players.add(src)
             }
         }
 
         println("PLAYERS => $players")
-
         var found = false
 
         players.distinct().forEach { player ->
@@ -144,7 +160,6 @@ class TubePelis  : MainAPI() {
                 println("PLAYER => $player")
 
                 if (player.contains("reproductor.php")) {
-
                     val vParam = Regex("""[?&]v=([^&]+)""")
                         .find(player)
                         ?.groupValues
@@ -152,7 +167,6 @@ class TubePelis  : MainAPI() {
 
                     if (vParam != null) {
                         val decodedParam = URLDecoder.decode(vParam, "UTF-8")
-
                         val decoded = String(
                             Base64.decode(
                                 decodedParam,
@@ -161,14 +175,7 @@ class TubePelis  : MainAPI() {
                         ).trim()
 
                         println("REPRODUCTOR V DECODED => $decoded")
-
-                        found = resolvePlayer(
-                            decoded,
-                            data,
-                            subtitleCallback,
-                            callback
-                        ) || found
-
+                        found = resolvePlayer(decoded, data, subtitleCallback, callback) || found
                         return@forEach
                     }
 
@@ -182,48 +189,28 @@ class TubePelis  : MainAPI() {
 
                     println("PLAYER HTML => $html")
 
-                    val encoded =
-                        Regex("""_0x\s*=\s*"([^"]+)"""")
-                            .find(html)
-                            ?.groupValues
-                            ?.getOrNull(1)
+                    val encoded = Regex("""_0x\s*=\s*"([^"]+)"""")
+                        .find(html)
+                        ?.groupValues
+                        ?.getOrNull(1)
 
                     if (encoded != null) {
                         println("ENCODED => $encoded")
-
-                        val decoded =
-                            String(
-                                Base64.decode(
-                                    encoded,
-                                    Base64.DEFAULT
-                                )
-                            ).trim()
+                        val decoded = String(
+                            Base64.decode(encoded, Base64.DEFAULT)
+                        ).trim()
 
                         println("DECODED => $decoded")
-
-                        found = resolvePlayer(
-                            decoded,
-                            data,
-                            subtitleCallback,
-                            callback
-                        ) || found
+                        found = resolvePlayer(decoded, data, subtitleCallback, callback) || found
                     }
-
                 } else {
-                    found = resolvePlayer(
-                        player,
-                        data,
-                        subtitleCallback,
-                        callback
-                    ) || found
+                    found = resolvePlayer(player, data, subtitleCallback, callback) || found
                 }
-
             } catch (e: Exception) {
                 println("LOADLINKS ERROR => ${e.message}")
                 e.printStackTrace()
             }
         }
-
         return found
     }
 
@@ -234,7 +221,6 @@ class TubePelis  : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-
         val fixed = player
             .replace("\\/", "/")
             .replace("&amp;", "&")
@@ -246,14 +232,7 @@ class TubePelis  : MainAPI() {
             when {
                 FilemoonResolver.isFilemoon(fixed) -> {
                     println("FILEMOON DETECTED => $fixed")
-
-                    val ok = FilemoonResolver.resolve(
-                        fixed,
-                        referer,
-                        subtitleCallback,
-                        callback
-                    )
-
+                    val ok = FilemoonResolver.resolve(fixed, referer, subtitleCallback, callback)
                     if (ok) found = true
                 }
 
@@ -265,14 +244,8 @@ class TubePelis  : MainAPI() {
                         fixed.contains("d000d", true) ||
                         fixed.contains("vide0.net", true) ||
                         fixed.contains("myvidplay", true) -> {
-
                     println("DOOD DETECTED => $fixed")
-
-                    DoodLaExtractor().getUrl(
-                        fixed,
-                        referer,
-                        subtitleCallback
-                    ) {
+                    DoodLaExtractor().getUrl(fixed, referer, subtitleCallback) {
                         found = true
                         callback(it)
                     }
@@ -280,12 +253,7 @@ class TubePelis  : MainAPI() {
 
                 else -> {
                     println("LOAD EXTRACTOR => $fixed")
-
-                    loadExtractor(
-                        fixed,
-                        referer,
-                        subtitleCallback
-                    ) {
+                    loadExtractor(fixed, referer, subtitleCallback) {
                         found = true
                         callback(it)
                     }
@@ -293,48 +261,34 @@ class TubePelis  : MainAPI() {
             }
         } catch (e: Exception) {
             println("RESOLVE PLAYER ERROR => ${e.message}")
-
             try {
-                loadExtractor(
-                    fixed,
-                    referer,
-                    subtitleCallback
-                ) {
+                loadExtractor(fixed, referer, subtitleCallback) {
                     found = true
                     callback(it)
                 }
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
 
         return found
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val a = selectFirst("a") ?: return null
-
+        val a = selectFirst("a[href*=/pelicula/]") ?: return null
         val href = a.attr("abs:href")
+        if (href.isBlank() || !href.contains("/pelicula/")) return null
 
-        if (href.isBlank()) {
-            return null
-        }
+        val title = a.attr("title")
+            .ifBlank { selectFirst("img")?.attr("alt").orEmpty() }
+            .ifBlank { a.text().trim().lines().firstOrNull()?.trim().orEmpty() }
+            .takeIf { it.isNotBlank() }
+            ?: return null
 
-        val title =
-            a.attr("title")
-                .ifBlank {
-                    selectFirst("img")?.attr("alt")
-                }
-                ?: return null
+        val poster = selectFirst("img")
+            ?.attr("abs:src")
+            ?.takeIf { it.isNotBlank() && !it.contains("data:") }
+            ?: selectFirst("img")?.attr("abs:data-src")
 
-        val poster =
-            selectFirst("img")
-                ?.attr("abs:src")
-
-        return newMovieSearchResponse(
-            title,
-            href,
-            TvType.Movie
-        ) {
+        return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = poster
         }
     }

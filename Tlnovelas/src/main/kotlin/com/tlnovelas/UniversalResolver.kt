@@ -39,13 +39,30 @@ object UniversalResolver {
                             loadExtractor(url, referer, subtitleCallback, callback)
                 }
 
+                // ——— BYSE NUEVO (PoW) ———
                 url.contains("bysejikuar", true) ||
-                        url.contains("f75s", true) -> {
-                    loadExtractor(url, referer, subtitleCallback, callback) ||
-                            extractBysejikuar(url, referer, callback)
+                        url.contains("bysekoze", true) ||
+                        url.contains("f75s", true) ||
+                        url.contains("byse.", true) -> {
+
+                    val extractor = when {
+                        url.contains("bysejikuar", true) -> ByseJikuar()
+                        url.contains("bysekoze", true)   -> ByseKoze()
+                        url.contains("f75s", true)       -> F75s()
+                        else                             -> ByseExtractor()
+                    }
+
+                    try {
+                        extractor.getUrl(url, referer, subtitleCallback, callback)
+                        true
+                    } catch (e: Exception) {
+                        // Si falla el nuevo, intenta el viejo como respaldo
+                        extractBysejikuar(url, referer, callback)
+                    }
                 }
 
                 url.contains("dooodster", true) ||
+                        url.contains("dooood", true) ||
                         url.contains("dood.", true) ||
                         url.contains("doodstream", true) -> {
                     loadExtractor(url, referer, subtitleCallback, callback)
